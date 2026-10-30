@@ -49,6 +49,7 @@ using Vector6d = Eigen::Matrix<double, 6, 1>;
 using Correspondences = tbb::concurrent_vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>>;
 using LinearSystem = std::pair<Eigen::Matrix6d, Eigen::Vector6d>;
 
+#ifndef KISS_ICP_CUDA
 namespace {
 inline double square(double x) { return x * x; }
 
@@ -120,8 +121,31 @@ LinearSystem BuildLinearSystem(const Correspondences &correspondences, const dou
     return {JTJ, JTr};
 }
 }  // namespace
+#endif  // !KISS_ICP_CUDA
 
 namespace kiss_icp {
+
+#ifdef KISS_ICP_CUDA
+namespace {
+// Data association + normal equations on the GPU (VoxelMapGpu::LinearSystem).
+LinearSystem BuildLinearSystemGpu(const VoxelHashMap &voxel_map,
+                                  const Sophus::SE3d &T,
+                                  const double max_correspondence_distance,
+                                  const double kernel_scale) {
+    const Eigen::Matrix<double, 3, 4, Eigen::RowMajor> T34 = T.matrix3x4();
+    const auto sums = voxel_map.Gpu().LinearSystem(T34.data(), max_correspondence_distance, kernel_scale);
+    Eigen::Matrix6d JTJ;
+    int idx = 0;
+    for (int a = 0; a < 6; ++a) {
+        for (int b = a; b < 6; ++b) {
+            JTJ(a, b) = JTJ(b, a) = sums.JTJ_upper[static_cast<std::size_t>(idx++)];
+        }
+    }
+    const Eigen::Vector6d JTr = Eigen::Map<const Eigen::Vector6d>(sums.JTr.data());
+    return {JTJ, JTr};
+}
+}  // namespace
+#endif
 
 Registration::Registration(int max_num_iteration, double convergence_criterion, int max_num_threads)
     : max_num_iterations_(max_num_iteration),
@@ -142,6 +166,23 @@ Sophus::SE3d Registration::AlignPointsToMap(const std::vector<Eigen::Vector3d> &
                                             const double kernel_scale) {
     if (voxel_map.Empty()) return initial_guess;
 
+#ifdef KISS_ICP_CUDA
+    // The source frame is uploaded once; each iteration only sends the current pose (12 doubles)
+    // and reads back the 6x6 system (28 doubles). Iterate exactly like the CPU version:
+    // source_j = T_icp * initial_guess * frame.
+    voxel_map.Gpu().SetSource(frame.empty() ? nullptr : frame.front().data(), frame.size());
+    Sophus::SE3d T_icp = Sophus::SE3d();
+    for (int j = 0; j < max_num_iterations_; ++j) {
+        // Equations (10) + (11)
+        const auto &[JTJ, JTr] = BuildLinearSystemGpu(voxel_map, T_icp * initial_guess, max_distance, kernel_scale);
+        const Eigen::Vector6d dx = JTJ.ldlt().solve(-JTr);
+        const Sophus::SE3d estimation = Sophus::SE3d::exp(dx);
+        // Equation (12)
+        T_icp = estimation * T_icp;
+        if (dx.norm() < convergence_criterion_) break;
+    }
+    return T_icp * initial_guess;
+#else
     // Equation (9)
     std::vector<Eigen::Vector3d> source = frame;
     TransformPoints(initial_guess, source);
@@ -164,6 +205,7 @@ Sophus::SE3d Registration::AlignPointsToMap(const std::vector<Eigen::Vector3d> &
     }
     // Spit the final transformation
     return T_icp * initial_guess;
+#endif
 }
 
 }  // namespace kiss_icp

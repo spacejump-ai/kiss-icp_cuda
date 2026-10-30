@@ -29,6 +29,9 @@ option(USE_SYSTEM_EIGEN3 "Use system pre-installed Eigen" ON)
 option(USE_SYSTEM_SOPHUS "Use system pre-installed Sophus" ON)
 option(USE_SYSTEM_TSL-ROBIN-MAP "Use system pre-installed tsl_robin" ON)
 option(USE_SYSTEM_TBB "Use system pre-installed oneAPI/tbb" ON)
+option(KISS_ICP_USE_CUDA "Keep the local voxel map and ICP data association on the GPU (cuCollections)" OFF)
+set(KISS_ICP_CUDA_MAX_POINTS_PER_VOXEL 20 CACHE STRING "Compile-time upper bound for max_points_per_voxel (CUDA map)")
+set(KISS_ICP_CUDA_MAX_VOXELS 524288 CACHE STRING "Default voxel capacity of the CUDA map")
 
 # ccache setup
 if(USE_CCACHE)
@@ -46,6 +49,18 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include(3rdparty/find_dependencies.cmake)
+
+if(KISS_ICP_USE_CUDA)
+  if(CMAKE_VERSION VERSION_LESS 3.24)
+    message(FATAL_ERROR "KISS_ICP_USE_CUDA requires CMake >= 3.24")
+  endif()
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES native)
+  endif()
+  enable_language(CUDA)
+  find_package(CUDAToolkit 12.0 REQUIRED)
+  include(3rdparty/cuco/cuco.cmake)
+endif()
 include(cmake/CompilerOptions.cmake)
 
 add_subdirectory(core)

@@ -30,6 +30,80 @@
 
 #include "VoxelUtils.hpp"
 
+#ifdef KISS_ICP_CUDA
+#include <cstring>
+
+namespace {
+// Eigen::Vector3d is 3 packed doubles, so std::vector<Eigen::Vector3d> is interleaved xyz.
+static_assert(sizeof(Eigen::Vector3d) == 3 * sizeof(double), "unexpected Eigen::Vector3d layout");
+inline const double *Data(const std::vector<Eigen::Vector3d> &v) { return v.empty() ? nullptr : v.front().data(); }
+}  // namespace
+
+namespace kiss_icp {
+
+VoxelHashMap::VoxelHashMap(double voxel_size,
+                           double max_distance,
+                           unsigned int max_points_per_voxel,
+                           std::size_t max_voxels)
+    : voxel_size_(voxel_size),
+      max_distance_(max_distance),
+      max_points_per_voxel_(max_points_per_voxel),
+      gpu_(std::make_unique<gpu::VoxelMapGpu>(voxel_size, max_distance, max_points_per_voxel, max_voxels)) {}
+
+void VoxelHashMap::Clear() { gpu_->Clear(); }
+
+bool VoxelHashMap::Empty() const { return gpu_->NumVoxels() == 0; }
+
+void VoxelHashMap::AddPoints(const std::vector<Eigen::Vector3d> &points) {
+    gpu_->AddPoints(Data(points), points.size());
+}
+
+void VoxelHashMap::RemovePointsFarFromLocation(const Eigen::Vector3d &origin) {
+    gpu_->RemoveFarFromLocation(origin.data());
+}
+
+std::vector<Eigen::Vector3d> VoxelHashMap::Pointcloud() const {
+    const std::vector<double> xyz = gpu_->Pointcloud();
+    std::vector<Eigen::Vector3d> points(xyz.size() / 3);
+    if (!points.empty()) std::memcpy(points.front().data(), xyz.data(), xyz.size() * sizeof(double));
+    return points;
+}
+
+std::vector<std::tuple<Eigen::Vector3d, double>> VoxelHashMap::GetClosestNeighbors(
+    const std::vector<Eigen::Vector3d> &queries) const {
+    std::vector<Eigen::Vector3d> nn(queries.size());
+    std::vector<double> dist(queries.size());
+    if (!queries.empty()) gpu_->ClosestNeighbors(Data(queries), queries.size(), nn.front().data(), dist.data());
+    std::vector<std::tuple<Eigen::Vector3d, double>> out;
+    out.reserve(queries.size());
+    for (std::size_t i = 0; i < queries.size(); ++i) {
+        // same convention as the CPU map: nothing found -> (0,0,0) at numeric_limits::max()
+        out.emplace_back(nn[i], dist[i]);
+    }
+    return out;
+}
+
+std::tuple<Eigen::Vector3d, double> VoxelHashMap::GetClosestNeighbor(const Eigen::Vector3d &query) const {
+    return GetClosestNeighbors({query}).front();
+}
+
+void VoxelHashMap::Update(const std::vector<Eigen::Vector3d> &points, const Eigen::Vector3d &origin) {
+    AddPoints(points);
+    RemovePointsFarFromLocation(origin);
+}
+
+void VoxelHashMap::Update(const std::vector<Eigen::Vector3d> &points, const Sophus::SE3d &pose) {
+    std::vector<Eigen::Vector3d> points_transformed(points.size());
+    std::transform(points.cbegin(), points.cend(), points_transformed.begin(),
+                   [&](const auto &point) { return pose * point; });
+    const Eigen::Vector3d &origin = pose.translation();
+    Update(points_transformed, origin);
+}
+
+}  // namespace kiss_icp
+
+#else  // CPU implementation
+
 namespace {
 using kiss_icp::Voxel;
 static const std::array<Voxel, 27> voxel_shifts{
@@ -131,3 +205,4 @@ void VoxelHashMap::RemovePointsFarFromLocation(const Eigen::Vector3d &origin) {
     }
 }
 }  // namespace kiss_icp
+#endif  // KISS_ICP_CUDA
