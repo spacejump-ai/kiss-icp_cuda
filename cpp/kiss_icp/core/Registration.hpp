@@ -40,6 +40,7 @@ struct Registration {
                                   const double kernel_scale);
 
     int max_num_iterations_;
+    int last_num_iterations_ = 0;  ///< ICP iterations used by the last AlignPointsToMap call
     double convergence_criterion_;
     int max_num_threads_;
 };

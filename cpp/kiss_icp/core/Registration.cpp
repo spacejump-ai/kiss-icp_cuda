@@ -164,6 +164,7 @@ Sophus::SE3d Registration::AlignPointsToMap(const std::vector<Eigen::Vector3d> &
                                             const Sophus::SE3d &initial_guess,
                                             const double max_distance,
                                             const double kernel_scale) {
+    last_num_iterations_ = 0;
     if (voxel_map.Empty()) return initial_guess;
 
 #ifdef KISS_ICP_CUDA
@@ -179,6 +180,7 @@ Sophus::SE3d Registration::AlignPointsToMap(const std::vector<Eigen::Vector3d> &
         const Sophus::SE3d estimation = Sophus::SE3d::exp(dx);
         // Equation (12)
         T_icp = estimation * T_icp;
+        last_num_iterations_ = j + 1;
         if (dx.norm() < convergence_criterion_) break;
     }
     return T_icp * initial_guess;
@@ -200,6 +202,7 @@ Sophus::SE3d Registration::AlignPointsToMap(const std::vector<Eigen::Vector3d> &
         TransformPoints(estimation, source);
         // Update iterations
         T_icp = estimation * T_icp;
+        last_num_iterations_ = j + 1;
         // Termination criteria
         if (dx.norm() < convergence_criterion_) break;
     }

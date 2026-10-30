@@ -163,13 +163,7 @@ Points MakeScene(std::mt19937 &rng, double x0, double x1) {
     return pts;
 }
 
-std::size_t NumVoxels(const kiss_icp::VoxelHashMap &m) {
-#ifdef KISS_ICP_CUDA
-    return m.NumVoxels();
-#else
-    return m.map_.size();
-#endif
-}
+std::size_t NumVoxels(const kiss_icp::VoxelHashMap &m) { return m.NumVoxels(); }
 }  // namespace
 
 int main() {

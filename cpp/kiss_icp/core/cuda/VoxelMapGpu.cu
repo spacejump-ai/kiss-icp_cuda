@@ -33,6 +33,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <cuco/static_map.cuh>
 #include <stdexcept>
 #include <string>
@@ -380,6 +381,46 @@ __global__ void __launch_bounds__(kBlockSize)
     }
 }
 
+// thrust/CUB algorithms (sort, unique, reduce, copy_if) allocate temporary storage on every
+// call. Plain cudaMalloc/cudaFree there costs far more than the work itself at our sizes and
+// cudaFree synchronizes the device, so keep released blocks around and hand them out again.
+class CachingAllocator {
+public:
+    using value_type = char;
+    CachingAllocator() = default;
+    CachingAllocator(const CachingAllocator &) = delete;
+    CachingAllocator &operator=(const CachingAllocator &) = delete;
+    ~CachingAllocator() {
+        for (auto &kv : free_) cudaFree(kv.second);
+        for (auto &kv : used_) cudaFree(kv.first);
+    }
+    char *allocate(std::ptrdiff_t n) {
+        const auto bytes = static_cast<std::size_t>(n);
+        auto it = free_.lower_bound(bytes);
+        char *p = nullptr;
+        std::size_t size = bytes;
+        if (it != free_.end()) {
+            size = it->first;
+            p = it->second;
+            free_.erase(it);
+        } else {
+            KISS_CUDA_CHECK(cudaMalloc(&p, bytes));
+        }
+        used_.emplace(p, size);
+        return p;
+    }
+    void deallocate(char *p, std::size_t) {
+        auto it = used_.find(p);
+        if (it == used_.end()) return;
+        free_.emplace(it->second, p);
+        used_.erase(it);
+    }
+
+private:
+    std::multimap<std::size_t, char *> free_;
+    std::map<char *, std::size_t> used_;
+};
+
 struct IsLiveKey {
     __host__ __device__ bool operator()(Key k) const { return k != kEmptyKey; }
 };
@@ -476,7 +517,7 @@ struct VoxelMapGpu::Impl {
         auto in_begin = thrust::make_zip_iterator(
             thrust::make_tuple(block_key.begin(), thrust::make_counting_iterator<Value>(0)));
         auto out_begin = thrust::make_zip_iterator(thrust::make_tuple(keys.begin(), vals.begin()));
-        auto out_end = thrust::copy_if(thrust::device, in_begin, in_begin + max_voxels,
+        auto out_end = thrust::copy_if(thrust::cuda::par(alloc), in_begin, in_begin + max_voxels,
                                        block_key.begin(), out_begin, IsLiveKey{});
         const auto live = static_cast<std::size_t>(out_end - out_begin);
         auto pairs = thrust::make_zip_iterator(thrust::make_tuple(keys.begin(), vals.begin()));
@@ -501,6 +542,8 @@ struct VoxelMapGpu::Impl {
     std::size_t tombstones = 0;
 
     // scratch (reused between calls to avoid reallocations)
+    mutable CachingAllocator alloc;
+    mutable thrust::device_vector<double> cloud_out;
     thrust::device_vector<double> in_xyz;
     thrust::device_vector<Key> keys;
     thrust::device_vector<int> order;
@@ -551,8 +594,8 @@ void VoxelMapGpu::AddPoints(const double *xyz, std::size_t n_points) {
     KISS_CUDA_CHECK(cudaGetLastError());
 
     // Group points by voxel, keeping input order inside each voxel.
-    thrust::stable_sort_by_key(thrust::device, d.keys.begin(), d.keys.end(), d.order.begin());
-    auto ends = thrust::unique_by_key_copy(thrust::device, d.keys.begin(), d.keys.end(),
+    thrust::stable_sort_by_key(thrust::cuda::par(d.alloc), d.keys.begin(), d.keys.end(), d.order.begin());
+    auto ends = thrust::unique_by_key_copy(thrust::cuda::par(d.alloc), d.keys.begin(), d.keys.end(),
                                            thrust::make_counting_iterator<int>(0),
                                            d.unique_keys.begin(), d.segment_start.begin());
     const int num_segments = static_cast<int>(ends.first - d.unique_keys.begin());
@@ -588,10 +631,11 @@ void VoxelMapGpu::RemoveFarFromLocation(const double origin[3]) {
 
 std::vector<double> VoxelMapGpu::Pointcloud() const {
     auto &d = *impl_;
-    const int total = thrust::reduce(thrust::device, d.block_count.begin(), d.block_count.end(), 0);
+    const int total = thrust::reduce(thrust::cuda::par(d.alloc), d.block_count.begin(), d.block_count.end(), 0);
     std::vector<double> out(3 * static_cast<std::size_t>(total));
     if (total == 0) return out;
-    thrust::device_vector<double> d_out(out.size());
+    d.cloud_out.resize(out.size());
+    auto &d_out = d.cloud_out;
     d.WriteCounter(Impl::kCursor, 0);
     GatherPointsKernel<<<d.Grid(d.max_voxels), kBlockSize>>>(static_cast<int>(d.max_voxels),
                                                              Raw(d.block_count), Raw(d.block_pts),

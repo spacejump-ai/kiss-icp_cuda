@@ -87,6 +87,7 @@ struct VoxelHashMap {
 
     inline void Clear() { map_.clear(); }
     inline bool Empty() const { return map_.empty(); }
+    inline std::size_t NumVoxels() const { return map_.size(); }
     void Update(const std::vector<Eigen::Vector3d> &points, const Eigen::Vector3d &origin);
     void Update(const std::vector<Eigen::Vector3d> &points, const Sophus::SE3d &pose);
     void AddPoints(const std::vector<Eigen::Vector3d> &points);
