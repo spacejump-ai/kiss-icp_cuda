@@ -167,7 +167,7 @@ __global__ void InsertSegmentsKernel(Ref ref,
                                      int *__restrict__ free_top,
                                      int *__restrict__ dropped,
                                      int max_points,
-                                     float resolution2) {
+                                     double resolution2) {
     for (int s = blockIdx.x * blockDim.x + threadIdx.x; s < num_segments;
          s += gridDim.x * blockDim.x) {
         const Key key = unique_keys[s];
@@ -200,11 +200,13 @@ __global__ void InsertSegmentsKernel(Ref ref,
             const int i = order[j];
             const Pt p{static_cast<float>(xyz[3 * i + 0]), static_cast<float>(xyz[3 * i + 1]),
                        static_cast<float>(xyz[3 * i + 2])};
+            // Squared distance in double on the float-stored coordinates: differences and
+            // squares are exact, so the decision is reproducible on the CPU (no FMA effects).
             bool too_close = false;
             for (int k = 0; k < count; ++k) {
-                const float ex = pts[k].x - p.x;
-                const float ey = pts[k].y - p.y;
-                const float ez = pts[k].z - p.z;
+                const double ex = static_cast<double>(pts[k].x) - static_cast<double>(p.x);
+                const double ey = static_cast<double>(pts[k].y) - static_cast<double>(p.y);
+                const double ez = static_cast<double>(pts[k].z) - static_cast<double>(p.z);
                 if (ex * ex + ey * ey + ez * ez < resolution2) {
                     too_close = true;
                     break;
@@ -400,7 +402,7 @@ struct VoxelMapGpu::Impl {
           max_distance(max_distance_),
           max_points(static_cast<int>(max_points_)),
           max_voxels(max_voxels_),
-          resolution2(static_cast<float>(voxel_size_ * voxel_size_ / max_points_)),
+          resolution2(voxel_size_ * voxel_size_ / max_points_),
           map(cuco::extent<std::size_t>{2 * max_voxels_},
               cuco::empty_key<Key>{kEmptyKey},
               cuco::empty_value<Value>{kEmptyValue},
@@ -486,7 +488,7 @@ struct VoxelMapGpu::Impl {
     double max_distance;
     int max_points;
     std::size_t max_voxels;
-    float resolution2;
+    double resolution2;
     int num_sms = 1;
 
     MapType map;
