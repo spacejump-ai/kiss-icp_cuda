@@ -28,18 +28,22 @@
 
 <hr />
 
-## Install
-
-```sh
-pip install kiss-icp
+## Preconditions
+```
+Cuda Toolkit >=12
+CMake 3.26.4
 ```
 
-Next, follow the instructions on how to run the system by typing:
-
-```sh
-kiss_icp_pipeline --help
+## Build
 ```
-
+cmake -B build -DKISS_ICP_USE_CUDA=ON
+// for RTX 30xx
+cmake -B build -DKISS_ICP_USE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89
+// in case multi Cuda installations
+cmake -B build -DKISS_ICP_USE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DCUDAToolkit_ROOT=/usr/local/cuda-12
+// in case CMake still want to use other cuda :-)
+cmake -B build -DKISS_ICP_USE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DCUDAToolkit_ROOT=/usr/local/cuda-12 -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12/bin/nvcc
+```
 <details>
 <summary>This should print the following help message:</summary>
 
