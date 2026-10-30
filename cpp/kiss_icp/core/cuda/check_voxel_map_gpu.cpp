@@ -1,13 +1,19 @@
-// Self-check for the CUDA voxel map: compares it against a straight re-implementation of the
-// original CPU VoxelHashMap logic, then runs a registration on a synthetic scene.
+// Self-check for the voxel map. Compares kiss_icp::VoxelHashMap (GPU in the KISS_ICP_USE_CUDA
+// build, the original robin_map otherwise) against a reference re-implementation, then runs a
+// registration and compares it with a reference ICP on the same map.
 //
-//   ./kiss_icp_cuda_check            -> prints PASS/FAIL per check and timings, exit code != 0 on failure
+// In the CUDA build the reference mimics the GPU storage exactly (points rounded to float,
+// too-close test as squared distance in double), so map content must match bit for bit.
+//
+//   ./kiss_icp_cuda_check     -> PASS/FAIL per check and timings, exit code != 0 on failure
+#include <Eigen/Cholesky>
 #include <Eigen/Core>
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 #include <limits>
 #include <random>
 #include <sophus/se3.hpp>
@@ -22,6 +28,14 @@ namespace {
 using kiss_icp::Voxel;
 using Points = std::vector<Eigen::Vector3d>;
 using Clock = std::chrono::steady_clock;
+using Matrix6d = Eigen::Matrix<double, 6, 6>;
+using Vector6d = Eigen::Matrix<double, 6, 1>;
+
+#ifdef KISS_ICP_CUDA
+constexpr bool kGpu = true;
+#else
+constexpr bool kGpu = false;
+#endif
 
 double Ms(Clock::time_point a, Clock::time_point b) {
     return std::chrono::duration<double, std::milli>(b - a).count();
@@ -34,25 +48,31 @@ void Check(bool ok, const char *what, double value = 0.0) {
 }
 
 // ---- reference: the original CPU VoxelHashMap (std::unordered_map instead of robin_map) ------
+
+Eigen::Vector3d ToFloat(const Eigen::Vector3d &p) { return p.cast<float>().cast<double>(); }
+
+// ---- reference map ---------------------------------------------------------------------------
 struct RefMap {
     double voxel_size, max_distance;
     unsigned int max_points;
     std::unordered_map<Voxel, Points> map;
 
+    bool TooClose(const Eigen::Vector3d &q, const Eigen::Vector3d &p) const {
+        if (kGpu) return (q - p).squaredNorm() < voxel_size * voxel_size / max_points;
+        return (q - p).norm() < std::sqrt(voxel_size * voxel_size / max_points);  // original
+    }
     void Add(const Points &points) {
-        const double res = std::sqrt(voxel_size * voxel_size / max_points);
-        for (const auto &p : points) {
-            const auto v = kiss_icp::PointToVoxel(p, voxel_size);
+        for (const auto &p_in : points) {
+            const auto v = kiss_icp::PointToVoxel(p_in, voxel_size);  // voxel from the input
+            const Eigen::Vector3d p = kGpu ? ToFloat(p_in) : p_in;     // stored value
             auto it = map.find(v);
             if (it == map.end()) {
-                Points vp;
-                vp.push_back(p);
-                map.emplace(v, std::move(vp));
+                map.emplace(v, Points{p});
                 continue;
             }
             auto &vp = it->second;
             if (vp.size() == max_points ||
-                std::any_of(vp.begin(), vp.end(), [&](const auto &q) { return (q - p).norm() < res; }))
+                std::any_of(vp.begin(), vp.end(), [&](const auto &q) { return TooClose(q, p); }))
                 continue;
             vp.push_back(p);
         }
@@ -70,21 +90,56 @@ struct RefMap {
         for (const auto &kv : map) n += kv.second.size();
         return n;
     }
-    double Closest(const Eigen::Vector3d &q) const {
+    std::pair<Eigen::Vector3d, double> Closest(const Eigen::Vector3d &q) const {
         const auto v = kiss_icp::PointToVoxel(q, voxel_size);
         double best = std::numeric_limits<double>::max();
+        Eigen::Vector3d nn = Eigen::Vector3d::Zero();
         for (int dx = -1; dx <= 1; ++dx)
             for (int dy = -1; dy <= 1; ++dy)
                 for (int dz = -1; dz <= 1; ++dz) {
                     auto it = map.find(v + Voxel(dx, dy, dz));
                     if (it == map.end()) continue;
-                    for (const auto &p : it->second) best = std::min(best, (p - q).norm());
+                    for (const auto &p : it->second) {
+                        const double d = (p - q).norm();
+                        if (d < best) best = d, nn = p;
+                    }
                 }
-        return best;
+        return {nn, best};
+    }
+    // KISS-ICP normal equations for the source transformed by T
+    std::pair<Matrix6d, Vector6d> LinearSystem(const Points &src, const Sophus::SE3d &T,
+                                               double max_corr, double ks) const {
+        Matrix6d JTJ = Matrix6d::Zero();
+        Vector6d JTr = Vector6d::Zero();
+        for (const auto &s : src) {
+            const Eigen::Vector3d p = T * s;
+            const auto [nn, d] = Closest(p);
+            if (d >= max_corr) continue;
+            const Eigen::Vector3d r = p - nn;
+            Eigen::Matrix<double, 3, 6> J;
+            J.block<3, 3>(0, 0).setIdentity();
+            J.block<3, 3>(0, 3) = -Sophus::SO3d::hat(p);
+            const double w = ks * ks / ((ks + r.squaredNorm()) * (ks + r.squaredNorm()));
+            JTJ += J.transpose() * w * J;
+            JTr += J.transpose() * w * r;
+        }
+        return {JTJ, JTr};
+    }
+    Sophus::SE3d Align(const Points &src, const Sophus::SE3d &guess, double max_corr, double ks,
+                       int max_iter, double conv) const {
+        Sophus::SE3d T_icp;
+        for (int j = 0; j < max_iter; ++j) {
+            const auto [JTJ, JTr] = LinearSystem(src, T_icp * guess, max_corr, ks);
+            const Vector6d dx = JTJ.ldlt().solve(-JTr);
+            T_icp = Sophus::SE3d::exp(dx) * T_icp;
+            if (dx.norm() < conv) break;
+        }
+        return T_icp * guess;
     }
 };
 
-// ---- synthetic "street": ground, two facades, poles, boxes ----------------------------------
+// ---- synthetic street: ground, wavy facades, poles, boxes -------------------------------------
+// The facades wiggle in y along x so that the travel direction is well constrained.
 Points MakeScene(std::mt19937 &rng, double x0, double x1) {
     std::uniform_real_distribution<double> u(0.0, 1.0);
     std::normal_distribution<double> noise(0.0, 0.01);
@@ -92,9 +147,9 @@ Points MakeScene(std::mt19937 &rng, double x0, double x1) {
     const auto n_along = static_cast<int>((x1 - x0) * 400);
     for (int i = 0; i < n_along; ++i) {
         const double x = x0 + (x1 - x0) * u(rng);
-        pts.emplace_back(x, -12.0 + 24.0 * u(rng), noise(rng));                    // ground
-        pts.emplace_back(x, -12.0 + noise(rng), 10.0 * u(rng));                    // left facade
-        pts.emplace_back(x, 12.0 + noise(rng), 10.0 * u(rng) + 0.3 * std::sin(x)); // right facade
+        pts.emplace_back(x, -12.0 + 24.0 * u(rng), noise(rng));  // ground
+        pts.emplace_back(x, -12.0 + 1.0 * std::sin(0.7 * x) + noise(rng), 10.0 * u(rng));
+        pts.emplace_back(x, 12.0 + 1.0 * std::cos(0.45 * x) + noise(rng), 10.0 * u(rng));
     }
     for (double x = std::ceil(x0 / 15.0) * 15.0; x < x1; x += 15.0) {  // poles + boxes
         for (int k = 0; k < 400; ++k) {
@@ -107,18 +162,30 @@ Points MakeScene(std::mt19937 &rng, double x0, double x1) {
     std::shuffle(pts.begin(), pts.end(), rng);
     return pts;
 }
+
+std::size_t NumVoxels(const kiss_icp::VoxelHashMap &m) {
+#ifdef KISS_ICP_CUDA
+    return m.NumVoxels();
+#else
+    return m.map_.size();
+#endif
+}
 }  // namespace
 
 int main() {
     const double voxel_size = 1.0, max_range = 60.0;
     const unsigned int max_points = 20;
     std::mt19937 rng(42);
+    std::printf("mode: %s\n", kGpu ? "CUDA voxel map" : "CPU voxel map (original)");
 
-    kiss_icp::VoxelHashMap gpu(voxel_size, max_range, max_points, /*max_voxels=*/1u << 17);
+#ifdef KISS_ICP_CUDA
+    kiss_icp::VoxelHashMap map(voxel_size, max_range, max_points, /*max_voxels=*/1u << 17);
+#else
+    kiss_icp::VoxelHashMap map(voxel_size, max_range, max_points);
+#endif
     RefMap ref{voxel_size, max_range, max_points, {}};
 
-    // 1) Drive along x, insert + crop like KissICP does. Small capacity so the tombstone rebuild
-    //    path gets exercised as voxels are dropped behind the vehicle.
+    // 1) Drive along x, insert + crop like KissICP does (exercises erase + tombstone rebuild).
     double t_update = 0.0;
     int frames = 0;
     for (double x = 0.0; x < 600.0; x += 2.0, ++frames) {
@@ -126,84 +193,119 @@ int main() {
         scan.resize(std::min<std::size_t>(scan.size(), 40000));
         const Eigen::Vector3d origin(x, 0.0, 1.8);
         const auto t0 = Clock::now();
-        gpu.Update(scan, origin);
-        const auto t1 = Clock::now();
-        t_update += Ms(t0, t1);
+        map.Update(scan, origin);
+        t_update += Ms(t0, Clock::now());
         ref.Add(scan);
         ref.Remove(origin);
     }
-    const auto gpu_cloud = gpu.Pointcloud();
-    Check(gpu.NumVoxels() == ref.map.size(), "voxel count matches reference",
-          static_cast<double>(gpu.NumVoxels()));
-    Check(gpu_cloud.size() == ref.NumPoints(), "point count matches reference",
-          static_cast<double>(gpu_cloud.size()));
-    Check(gpu.Gpu().DroppedForCapacity() == 0, "no points dropped for capacity");
-
-    // Same points (float storage on the GPU -> compare after rounding to 1e-4 m).
+    const auto cloud = map.Pointcloud();
+    std::printf("       map: %zu voxels / %zu points, reference: %zu voxels / %zu points\n",
+                NumVoxels(map), cloud.size(), ref.map.size(), ref.NumPoints());
+    Check(NumVoxels(map) == ref.map.size(), "voxel count matches reference",
+          static_cast<double>(NumVoxels(map)));
+    Check(cloud.size() == ref.NumPoints(), "point count matches reference",
+          static_cast<double>(cloud.size()));
+#ifdef KISS_ICP_CUDA
+    Check(map.Gpu().DroppedForCapacity() == 0, "no points dropped for capacity");
+#endif
     {
-        auto key = [](const Eigen::Vector3d &p) {
-            return std::array<long long, 3>{std::llround(p.x() * 1e4), std::llround(p.y() * 1e4),
-                                            std::llround(p.z() * 1e4)};
-        };
-        std::vector<std::array<long long, 3>> a, b;
-        for (const auto &p : gpu_cloud) a.push_back(key(p));
+        using Key = std::array<double, 3>;
+        std::vector<Key> a, b, diff;
+        for (const auto &p : cloud) a.push_back({p.x(), p.y(), p.z()});
         for (const auto &kv : ref.map)
-            for (const auto &p : kv.second) b.push_back(key(p));
+            for (const auto &p : kv.second) b.push_back({p.x(), p.y(), p.z()});
         std::sort(a.begin(), a.end());
         std::sort(b.begin(), b.end());
-        std::size_t mismatches = 0;
-        for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
-            for (int k = 0; k < 3; ++k) mismatches += std::llabs(a[i][static_cast<std::size_t>(k)] - b[i][static_cast<std::size_t>(k)]) > 1;
-        }
-        Check(mismatches == 0, "map content identical (1e-4 m)", static_cast<double>(mismatches));
+        std::set_symmetric_difference(a.begin(), a.end(), b.begin(), b.end(),
+                                      std::back_inserter(diff));
+        Check(diff.empty(), "map content identical (points not in both)",
+              static_cast<double>(diff.size()));
     }
 
-    // 2) Batched nearest neighbour vs reference.
+    // 2) Nearest neighbour vs reference.
     {
         Points queries;
         std::uniform_real_distribution<double> ux(540.0, 600.0), uy(-13.0, 13.0), uz(-1.0, 11.0);
         for (int i = 0; i < 20000; ++i) queries.emplace_back(ux(rng), uy(rng), uz(rng));
         const auto t0 = Clock::now();
-        const auto res = gpu.GetClosestNeighbors(queries);
+#ifdef KISS_ICP_CUDA
+        const auto res = map.GetClosestNeighbors(queries);
+#else
+        std::vector<std::tuple<Eigen::Vector3d, double>> res;
+        for (const auto &q : queries) res.push_back(map.GetClosestNeighbor(q));
+#endif
         const auto t1 = Clock::now();
         double max_err = 0.0;
-        std::size_t both_missing = 0, one_missing = 0;
+        std::size_t missing = 0, disagree = 0;
         for (std::size_t i = 0; i < queries.size(); ++i) {
-            const double d_ref = ref.Closest(queries[i]);
-            const double d_gpu = std::get<1>(res[i]);
+            const double d_ref = ref.Closest(queries[i]).second;
+            const double d_map = std::get<1>(res[i]);
             const bool m_ref = d_ref == std::numeric_limits<double>::max();
-            const bool m_gpu = d_gpu == std::numeric_limits<double>::max();
-            if (m_ref && m_gpu) { ++both_missing; continue; }
-            if (m_ref != m_gpu) { ++one_missing; continue; }
-            max_err = std::max(max_err, std::abs(d_ref - d_gpu));
+            const bool m_map = d_map == std::numeric_limits<double>::max();
+            if (m_ref && m_map) { ++missing; continue; }
+            if (m_ref != m_map) { ++disagree; continue; }
+            max_err = std::max(max_err, std::abs(d_ref - d_map));
         }
-        Check(one_missing == 0, "NN found/not-found agrees", static_cast<double>(one_missing));
+        Check(disagree == 0, "NN found/not-found agrees", static_cast<double>(disagree));
         Check(max_err < 1e-4, "NN distance max abs error [m]", max_err);
-        std::printf("       %zu queries in %.3f ms (%zu without neighbour)\n", queries.size(), Ms(t0, t1), both_missing);
+        std::printf("       %zu queries in %.3f ms (%zu without neighbour)\n", queries.size(),
+                    Ms(t0, t1), missing);
     }
 
-    // 3) Registration: misalign a fresh scan of the current surroundings and align it back.
+    // 3) Registration of a fresh scan with a known offset, vs reference ICP on the same map.
     {
         const double x = 598.0;
-        Points scan = MakeScene(rng, x - 40.0, x + 60.0);
-        Points frame;  // in sensor frame, sensor at (x, 0, 1.8)
+        const Points scan = MakeScene(rng, x - 40.0, x + 60.0);
         const Sophus::SE3d T_world_sensor(Sophus::SO3d(), Eigen::Vector3d(x, 0.0, 1.8));
+        Points frame;
         for (const auto &p : scan) frame.push_back(T_world_sensor.inverse() * p);
-        frame = kiss_icp::VoxelDownsample(frame, 0.5 * voxel_size);
+        frame = kiss_icp::VoxelDownsample(frame, 1.5 * voxel_size);  // like KissICP's source
 
-        const Sophus::SE3d delta = Sophus::SE3d::exp((Eigen::Matrix<double, 6, 1>() << 0.4, -0.25, 0.05, 0.004, -0.003, 0.03).finished());
-        const Sophus::SE3d guess = T_world_sensor * delta;
-        kiss_icp::Registration reg(500, 1e-4, 0);
+        Vector6d xi;
+        xi << 0.4, -0.25, 0.05, 0.004, -0.003, 0.03;
+        const Sophus::SE3d guess = T_world_sensor * Sophus::SE3d::exp(xi);
+        const double max_corr = 3.0, ks = 1.0, conv = 1e-4;
+        const int max_iter = 500;
+
+#ifdef KISS_ICP_CUDA
+        {   // one linear system at the initial guess, GPU vs reference
+            Points src(frame);
+            const Sophus::SE3d T = guess;
+            map.Gpu().SetSource(src.front().data(), src.size());
+            const Eigen::Matrix<double, 3, 4, Eigen::RowMajor> T34 = T.matrix3x4();
+            const auto s = map.Gpu().LinearSystem(T34.data(), max_corr, ks);
+            Matrix6d JTJ;
+            int idx = 0;
+            for (int a = 0; a < 6; ++a)
+                for (int b = a; b < 6; ++b) JTJ(a, b) = JTJ(b, a) = s.JTJ_upper[std::size_t(idx++)];
+            const Vector6d JTr = Eigen::Map<const Vector6d>(s.JTr.data());
+            const auto [JTJ_ref, JTr_ref] = ref.LinearSystem(src, T, max_corr, ks);
+            Check((JTJ - JTJ_ref).norm() / JTJ_ref.norm() < 1e-6, "JTJ rel. error vs reference",
+                  (JTJ - JTJ_ref).norm() / JTJ_ref.norm());
+            Check((JTr - JTr_ref).norm() / JTr_ref.norm() < 1e-6, "JTr rel. error vs reference",
+                  (JTr - JTr_ref).norm() / JTr_ref.norm());
+        }
+#endif
+        kiss_icp::Registration reg(max_iter, conv, 0);
         const auto t0 = Clock::now();
-        const Sophus::SE3d est = reg.AlignPointsToMap(frame, gpu, guess, 3.0 * 1.0, 1.0);
+        const Sophus::SE3d est = reg.AlignPointsToMap(frame, map, guess, max_corr, ks);
         const auto t1 = Clock::now();
+        const Sophus::SE3d est_ref = ref.Align(frame, guess, max_corr, ks, max_iter, conv);
+
+        const Sophus::SE3d d_ref = est_ref.inverse() * est;
+        Check(d_ref.translation().norm() < 1e-3, "pose vs reference ICP, translation [m]",
+              d_ref.translation().norm());
+        Check(d_ref.so3().log().norm() < 1e-4, "pose vs reference ICP, rotation [rad]",
+              d_ref.so3().log().norm());
         const Sophus::SE3d err = T_world_sensor.inverse() * est;
-        Check(err.translation().norm() < 0.02, "registration translation error [m]", err.translation().norm());
-        Check(err.so3().log().norm() < 0.002, "registration rotation error [rad]", err.so3().log().norm());
+        Check(err.translation().norm() < 0.02, "pose vs ground truth, translation [m]",
+              err.translation().norm());
+        Check(err.so3().log().norm() < 0.002, "pose vs ground truth, rotation [rad]",
+              err.so3().log().norm());
         std::printf("       %zu source points, AlignPointsToMap %.3f ms\n", frame.size(), Ms(t0, t1));
     }
 
-    std::printf("       %d map updates, avg %.3f ms, %zu voxels live\n", frames, t_update / frames, gpu.NumVoxels());
+    std::printf("       %d map updates, avg %.3f ms\n", frames, t_update / frames);
     std::printf("%s\n", failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");
     return failures == 0 ? 0 : 1;
 }
