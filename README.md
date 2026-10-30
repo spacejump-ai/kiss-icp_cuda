@@ -36,20 +36,26 @@ CMake 3.26.4
 
 ## Build
 ```
+cd cpp/kiss_icp
 cmake -B build -DKISS_ICP_USE_CUDA=ON
 // for RTX 30xx
 cmake -B build -DKISS_ICP_USE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89
 // in case multi Cuda installations
-cmake -B build -DKISS_ICP_USE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DCUDAToolkit_ROOT=/usr/local/cuda-12
+cmake -B build -DKISS_ICP_USE_CUDA=ON -DCUDAToolkit_ROOT=/usr/local/cuda-12
 // in case CMake still want to use other cuda :-)
-cmake -B build -DKISS_ICP_USE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DCUDAToolkit_ROOT=/usr/local/cuda-12 -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12/bin/nvcc
+cmake -B build -DKISS_ICP_USE_CUDA=ON -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12/bin/nvcc
 ```
-<details>
-<summary>This should print the following help message:</summary>
 
-![out](https://github.com/user-attachments/assets/7dea767f-d0e4-4f6b-a523-ba3be25bbfae)
+```
+cmake -B build -DKISS_ICP_USE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DCUDAToolkit_ROOT=/usr/local/cuda-12 -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12/bin/nvcc
+cmake --build build
+```
 
-</details>
+## Test
+```
+cd cpp/kiss_icp (already there after build)
+build/core/kiss_icp_cuda_check
+```
 
 For advanced instructions on the Python package please see [this README](python/README.md)
 
