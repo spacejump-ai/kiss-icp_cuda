@@ -27,24 +27,11 @@
 #include <vector>
 
 #include "kiss_icp/core/Preprocessing.hpp"
-#include <cstdlib>
-#include <vector>
-
 #include "kiss_icp/core/Registration.hpp"
 #include "kiss_icp/core/Threshold.hpp"
 #include "kiss_icp/core/VoxelHashMap.hpp"
 
 namespace kiss_icp::pipeline {
-
-/// Per-stage timing of RegisterFrame. Enabled with the environment variable KISS_ICP_PROFILE
-/// (its value is the report interval in frames, e.g. KISS_ICP_PROFILE=100; any non-number = 50).
-/// Reports go to stderr; stats() can also be read directly.
-struct FrameTiming {
-    double preprocess_ms = 0.0, voxelize_ms = 0.0, align_ms = 0.0, update_ms = 0.0,
-           total_ms = 0.0;
-    int icp_iterations = 0;
-    std::size_t input_points = 0, source_points = 0, map_points_added = 0;
-};
 
 struct KISSConfig {
     // map params
@@ -78,12 +65,7 @@ public:
           registration_(
               config.max_num_iterations, config.convergence_criterion, config.max_num_threads),
           local_map_(config.voxel_size, config.max_range, config.max_points_per_voxel),
-          adaptive_threshold_(config.initial_threshold, config.min_motion_th, config.max_range) {
-        if (const char *env = std::getenv("KISS_ICP_PROFILE")) {
-            const int n = std::atoi(env);
-            profile_every_ = n > 0 ? n : 50;
-        }
-    }
+          adaptive_threshold_(config.initial_threshold, config.min_motion_th, config.max_range) {}
 
 public:
     Vector3dVectorTuple RegisterFrame(const std::vector<Eigen::Vector3d> &frame,
@@ -102,15 +84,7 @@ public:
     Sophus::SE3d &delta() { return last_delta_; }
     void Reset();
 
-    /// Timing of the most recent RegisterFrame call (always measured, cheap).
-    const FrameTiming &LastTiming() const { return last_timing_; }
-
 private:
-    void ReportProfile();
-    FrameTiming last_timing_;
-    int profile_every_ = 0;  // 0 = no reports
-    std::vector<FrameTiming> profile_window_;
-
     Sophus::SE3d last_pose_;
     Sophus::SE3d last_delta_;
 
