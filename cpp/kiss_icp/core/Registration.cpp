@@ -171,8 +171,12 @@ Sophus::SE3d Registration::AlignPointsToMap(const std::vector<Eigen::Vector3d> &
     struct AlignInfo {  // reports iterations/source size on every return path
         const int &iterations;
         std::size_t points;
-        ~AlignInfo() { profile::SetAlignInfo(iterations, points); }
+        ~AlignInfo() {
+            profile::SetAlignInfo(iterations, points);
+            profile::SetInAlign(false);
+        }
     } align_info{last_num_iterations_, frame.size()};
+    profile::SetInAlign(true);
     if (voxel_map.Empty()) return initial_guess;
 
 #ifdef KISS_ICP_CUDA

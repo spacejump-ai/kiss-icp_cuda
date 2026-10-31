@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -113,6 +114,12 @@ State &GetState() {
 }  // namespace
 
 bool Enabled() { return ReportEvery() > 0; }
+
+namespace {
+std::atomic<bool> g_in_align{false};
+}
+bool InAlign() { return g_in_align.load(std::memory_order_relaxed); }
+void SetInAlign(bool in_align) { g_in_align.store(in_align, std::memory_order_relaxed); }
 
 void BeginFrame() {
     if (!Enabled()) return;

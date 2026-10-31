@@ -94,6 +94,10 @@ struct VoxelHashMap {
     void RemovePointsFarFromLocation(const Eigen::Vector3d &origin);
     std::vector<Eigen::Vector3d> Pointcloud() const;
     std::tuple<Eigen::Vector3d, double> GetClosestNeighbor(const Eigen::Vector3d &query) const;
+    /// Batched version (TBB parallel). Same call exists in the CUDA build, where it is one GPU
+    /// launch instead of one round trip per point, so prefer it in user code.
+    std::vector<std::tuple<Eigen::Vector3d, double>> GetClosestNeighbors(
+        const std::vector<Eigen::Vector3d> &queries) const;
 
     double voxel_size_;
     double max_distance_;

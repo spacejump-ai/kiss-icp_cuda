@@ -18,8 +18,8 @@ enum Stage : int {
     kMapAdd,          // VoxelHashMap::AddPoints
     kMapCrop,         // VoxelHashMap::RemovePointsFarFromLocation
     kPointcloud,      // VoxelHashMap::Pointcloud (e.g. a viewer pulling the local map)
-    kNnSingle,        // VoxelHashMap::GetClosestNeighbor, CUDA build only (one GPU round trip each)
-    kNnBatch,         // VoxelHashMap::GetClosestNeighbors, CUDA build only
+    kNnSingle,        // VoxelHashMap::GetClosestNeighbor called by user code (not by ICP)
+    kNnBatch,         // VoxelHashMap::GetClosestNeighbors
     kNumStages
 };
 
@@ -31,9 +31,14 @@ void BeginFrame();
 void SetAlignInfo(int icp_iterations, std::size_t source_points);
 void Add(Stage stage, double ms);
 
+/// True while AlignPointsToMap runs (used to skip the CPU ICP's own internal NN calls).
+bool InAlign();
+void SetInAlign(bool in_align);
+
 class Scope {
 public:
-    explicit Scope(Stage stage) : stage_(stage), on_(Enabled()) {
+    explicit Scope(Stage stage, bool skip_during_align = false)
+        : stage_(stage), on_(Enabled() && !(skip_during_align && InAlign())) {
         if (on_) t0_ = std::chrono::steady_clock::now();
     }
     ~Scope() {

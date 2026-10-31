@@ -117,6 +117,9 @@ void VoxelHashMap::Update(const std::vector<Eigen::Vector3d> &points, const Soph
 
 #else  // CPU implementation
 
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+
 namespace {
 using kiss_icp::Voxel;
 static const std::array<Voxel, 27> voxel_shifts{
@@ -132,6 +135,8 @@ namespace kiss_icp {
 
 std::tuple<Eigen::Vector3d, double> VoxelHashMap::GetClosestNeighbor(
     const Eigen::Vector3d &query) const {
+    // Only user calls are timed; the ICP's own per-point calls happen inside "align".
+    const profile::Scope profile_scope(profile::kNnSingle, /*skip_during_align=*/true);
     // Convert the point to voxel coordinates
     const auto &voxel = PointToVoxel(query, voxel_size_);
     // Find the nearest neighbor
@@ -154,6 +159,21 @@ std::tuple<Eigen::Vector3d, double> VoxelHashMap::GetClosestNeighbor(
         }
     });
     return std::make_tuple(closest_neighbor, closest_distance);
+}
+
+std::vector<std::tuple<Eigen::Vector3d, double>> VoxelHashMap::GetClosestNeighbors(
+    const std::vector<Eigen::Vector3d> &queries) const {
+    const profile::Scope profile_scope(profile::kNnBatch);
+    const bool was_in_align = profile::InAlign();
+    profile::SetInAlign(true);  // don't time the per-point calls below individually
+    std::vector<std::tuple<Eigen::Vector3d, double>> out(queries.size());
+    tbb::parallel_for(tbb::blocked_range<std::size_t>(0, queries.size()),
+                      [&](const tbb::blocked_range<std::size_t> &r) {
+                          for (std::size_t i = r.begin(); i != r.end(); ++i)
+                              out[i] = GetClosestNeighbor(queries[i]);
+                      });
+    profile::SetInAlign(was_in_align);
+    return out;
 }
 
 std::vector<Eigen::Vector3d> VoxelHashMap::Pointcloud() const {
