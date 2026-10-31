@@ -38,6 +38,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "VoxelKey.cuh"
 #include "VoxelMapGpu.hpp"
 
 #define KISS_CUDA_CHECK(expr)                                                                \
@@ -56,17 +57,13 @@ constexpr int kBlockSize = 256;
 constexpr int kMaxPoints = kMaxPointsPerVoxel;
 constexpr int kNumSums = 28;  // 21 (JTJ upper) + 6 (JTr) + 1 (count)
 
-// 21 bits per axis, offset so that negative voxel coordinates map to positive ints.
-// Covers +-1,048,576 voxels per axis (+-1048 km at 1 m voxels). Top bit is always 0, so the two
-// all-ones sentinels below can never collide with a real key.
-constexpr int kKeyBits = 21;
-constexpr long long kKeyOffset = 1LL << (kKeyBits - 1);
-constexpr unsigned long long kKeyMask = (1ULL << kKeyBits) - 1ULL;
 constexpr unsigned long long kEmptyKey = ~0ULL;
 constexpr unsigned long long kErasedKey = ~0ULL - 1ULL;
 constexpr unsigned int kEmptyValue = ~0U;
 
-using Key = unsigned long long;
+using detail::Key;
+using detail::PackKey;
+using detail::ToVoxel;
 using Value = unsigned int;
 using MapType = cuco::static_map<Key,
                                  Value,
@@ -82,16 +79,6 @@ struct Pt {
 struct Mat34 {
     double m[12];
 };
-
-__host__ __device__ inline Key PackKey(int x, int y, int z) {
-    return (static_cast<Key>(x + kKeyOffset) & kKeyMask) |
-           ((static_cast<Key>(y + kKeyOffset) & kKeyMask) << kKeyBits) |
-           ((static_cast<Key>(z + kKeyOffset) & kKeyMask) << (2 * kKeyBits));
-}
-
-__device__ inline int ToVoxel(double v, double voxel_size) {
-    return static_cast<int>(floor(v / voxel_size));
-}
 
 // ---------------------------------------------------------------------------------------------
 // Nearest neighbour inside the 27-voxel neighbourhood of q. Returns squared distance (FLT_MAX if

@@ -42,6 +42,12 @@ free list   stack of unused block indices
   the pose (12 doubles) and reads back 28 doubles (JTJ upper triangle, JTr, count). NN search is
   float, residuals and the normal equations are double.
 
+* **VoxelDownsample** (`DownsampleGpu.cu`, used automatically in the CUDA build for inputs of
+  4096+ points): voxel keys on the GPU, stable radix sort of (key, index), flag the first entry of
+  each run, compact the flagged points. Keeps the first point of each voxel like the CPU version,
+  so the kept set is identical. The output comes in input order rather than robin_map order.
+  `VoxelDownsampleCpu()` is the original, available in both builds.
+
 Public API of `VoxelHashMap` is unchanged (`KissICP.cpp`, pybind sources compile as-is). Additions:
 `GetClosestNeighbors(vector)` (batched), `NumVoxels()`, `Gpu()`.
 

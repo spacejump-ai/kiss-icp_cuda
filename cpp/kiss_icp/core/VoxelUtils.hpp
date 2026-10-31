@@ -36,9 +36,15 @@ inline Voxel PointToVoxel(const Eigen::Vector3d &point, const double voxel_size)
                  static_cast<int>(std::floor(point.z() / voxel_size)));
 }
 
-/// Voxelize a point cloud keeping the original coordinates
+/// Voxelize a point cloud keeping the original coordinates (first point of every voxel).
+/// CUDA build: runs on the GPU for inputs >= gpu::kDownsampleMinPoints and returns the points
+/// in input order; the set of kept points is identical to the CPU version.
 std::vector<Eigen::Vector3d> VoxelDownsample(const std::vector<Eigen::Vector3d> &frame,
                                              const double voxel_size);
+
+/// The original CPU implementation (tsl::robin_map), available in both builds.
+std::vector<Eigen::Vector3d> VoxelDownsampleCpu(const std::vector<Eigen::Vector3d> &frame,
+                                                const double voxel_size);
 
 }  // namespace kiss_icp
 

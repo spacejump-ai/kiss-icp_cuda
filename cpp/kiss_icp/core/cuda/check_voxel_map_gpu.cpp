@@ -179,6 +179,60 @@ int main() {
 #endif
     RefMap ref{voxel_size, max_range, max_points, {}};
 
+    // 0) VoxelDownsample vs the CPU implementation (650k points, negative coordinates, points
+    //    exactly on voxel borders, duplicates).
+    {
+        std::uniform_real_distribution<double> uc(-100.0, 100.0), uh(-3.0, 20.0);
+        std::uniform_int_distribution<int> grid(-400, 400);
+        Points cloud;
+        cloud.reserve(650000);
+        for (int i = 0; i < 650000; ++i) {
+            if (i % 10 == 0) {         // on a 0.25 m lattice: exactly on 0.5 m borders
+                cloud.emplace_back(0.25 * grid(rng), 0.25 * grid(rng), 0.25 * (grid(rng) % 40));
+            } else if (i % 97 == 0) {  // exact duplicate of an earlier point
+                cloud.push_back(cloud[static_cast<std::size_t>(i / 2)]);
+            } else {
+                cloud.emplace_back(uc(rng), uc(rng), uh(rng));
+            }
+        }
+        for (double vs : {0.5, 1.5}) {
+            // reference: first point of each voxel, in input order
+            Points ref_ds;
+            {
+                std::unordered_map<Voxel, bool> seen;
+                seen.reserve(cloud.size());
+                for (const auto &p : cloud)
+                    if (seen.emplace(kiss_icp::PointToVoxel(p, vs), true).second) ref_ds.push_back(p);
+            }
+            const auto t0 = Clock::now();
+            const Points ds = kiss_icp::VoxelDownsample(cloud, vs);
+            const auto t1 = Clock::now();
+            const Points cpu = kiss_icp::VoxelDownsampleCpu(cloud, vs);
+            const auto t2 = Clock::now();
+
+            auto sorted = [](Points v) {
+                std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) {
+                    return std::lexicographical_compare(a.data(), a.data() + 3, b.data(), b.data() + 3);
+                });
+                return v;
+            };
+            char what[96];
+            std::snprintf(what, sizeof(what), "downsample %.1f m: same points as CPU version", vs);
+            Check(sorted(ds) == sorted(cpu), what, static_cast<double>(ds.size()));
+            if (kGpu) {
+                std::snprintf(what, sizeof(what), "downsample %.1f m: input order kept", vs);
+                Check(ds == ref_ds, what);
+            }
+            std::printf("       %zu -> %zu points: VoxelDownsample %.2f ms, CPU version %.2f ms\n",
+                        cloud.size(), ds.size(), Ms(t0, t1), Ms(t1, t2));
+        }
+        // below the GPU threshold the CPU path is used; result must still be right
+        const Points small(cloud.begin(), cloud.begin() + 1000);
+        const Points ds_small = kiss_icp::VoxelDownsample(small, 0.5);
+        Check(ds_small.size() == kiss_icp::VoxelDownsampleCpu(small, 0.5).size(),
+              "downsample small input (CPU path)", static_cast<double>(ds_small.size()));
+    }
+
     // 1) Drive along x, insert + crop like KissICP does (exercises erase + tombstone rebuild).
     double t_update = 0.0;
     int frames = 0;

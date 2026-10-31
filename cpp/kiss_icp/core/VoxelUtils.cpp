@@ -4,11 +4,32 @@
 
 #include "Profile.hpp"
 
+#ifdef KISS_ICP_CUDA
+#include "cuda/DownsampleGpu.hpp"
+#endif
+
 namespace kiss_icp {
 
 std::vector<Eigen::Vector3d> VoxelDownsample(const std::vector<Eigen::Vector3d> &frame,
                                              const double voxel_size) {
     const profile::Scope profile_scope(profile::kVoxelize);
+#ifdef KISS_ICP_CUDA
+    if (frame.size() >= gpu::kDownsampleMinPoints) {
+        static_assert(sizeof(Eigen::Vector3d) == 3 * sizeof(double), "unexpected Eigen layout");
+        std::vector<Eigen::Vector3d> out;
+        gpu::VoxelDownsample(frame.front().data(), frame.size(), voxel_size, [&](std::size_t m) {
+            out.resize(m);
+            return m > 0 ? out.front().data() : nullptr;
+        });
+        return out;
+    }
+#endif
+    // if < minpoints fallback to CPU
+	return VoxelDownsampleCpu(frame, voxel_size);
+}
+
+std::vector<Eigen::Vector3d> VoxelDownsampleCpu(const std::vector<Eigen::Vector3d> &frame,
+                                                const double voxel_size) {
     tsl::robin_map<Voxel, Eigen::Vector3d> grid;
     grid.reserve(frame.size());
     std::for_each(frame.cbegin(), frame.cend(), [&](const auto &point) {
