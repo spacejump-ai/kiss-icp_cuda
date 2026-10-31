@@ -2,10 +2,13 @@
 
 #include <tsl/robin_map.h>
 
+#include "Profile.hpp"
+
 namespace kiss_icp {
 
 std::vector<Eigen::Vector3d> VoxelDownsample(const std::vector<Eigen::Vector3d> &frame,
                                              const double voxel_size) {
+    const profile::Scope profile_scope(profile::kVoxelize);
     tsl::robin_map<Voxel, Eigen::Vector3d> grid;
     grid.reserve(frame.size());
     std::for_each(frame.cbegin(), frame.cend(), [&](const auto &point) {

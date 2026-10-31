@@ -22,6 +22,8 @@
 // SOFTWARE.
 #include "Preprocessing.hpp"
 
+#include "Profile.hpp"
+
 #include <tbb/blocked_range.h>
 #include <tbb/concurrent_vector.h>
 #include <tbb/global_control.h>
@@ -55,6 +57,7 @@ Preprocessor::Preprocessor(const double max_range,
 std::vector<Eigen::Vector3d> Preprocessor::Preprocess(const std::vector<Eigen::Vector3d> &frame,
                                                       const std::vector<double> &timestamps,
                                                       const Sophus::SE3d &relative_motion) const {
+    const profile::Scope profile_scope(profile::kPreprocess);
     const std::vector<Eigen::Vector3d> &deskewed_frame = [&]() {
         if (!deskew_ || timestamps.empty()) {
             return frame;

@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace kiss_icp::gpu {
@@ -36,6 +37,9 @@ struct LinearSystemSums {
     std::array<double, 6> JTr{};
     std::size_t num_correspondences = 0;
 };
+
+/// "NVIDIA GeForce RTX 3060 (sm_86, 28 SMs)" for the current device.
+std::string DeviceDescription();
 
 class VoxelMapGpu {
 public:

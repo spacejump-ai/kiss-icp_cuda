@@ -28,6 +28,7 @@
 #include <sophus/se3.hpp>
 #include <vector>
 
+#include "Profile.hpp"
 #include "VoxelUtils.hpp"
 
 #ifdef KISS_ICP_CUDA
@@ -55,25 +56,29 @@ void VoxelHashMap::Clear() { gpu_->Clear(); }
 bool VoxelHashMap::Empty() const { return gpu_->NumVoxels() == 0; }
 
 void VoxelHashMap::AddPoints(const std::vector<Eigen::Vector3d> &points) {
+    const profile::Scope profile_scope(profile::kMapAdd);
     gpu_->AddPoints(Data(points), points.size());
 }
 
 void VoxelHashMap::RemovePointsFarFromLocation(const Eigen::Vector3d &origin) {
+    const profile::Scope profile_scope(profile::kMapCrop);
     gpu_->RemoveFarFromLocation(origin.data());
 }
 
 std::vector<Eigen::Vector3d> VoxelHashMap::Pointcloud() const {
+    const profile::Scope profile_scope(profile::kPointcloud);
     const std::vector<double> xyz = gpu_->Pointcloud();
     std::vector<Eigen::Vector3d> points(xyz.size() / 3);
     if (!points.empty()) std::memcpy(points.front().data(), xyz.data(), xyz.size() * sizeof(double));
     return points;
 }
 
-std::vector<std::tuple<Eigen::Vector3d, double>> VoxelHashMap::GetClosestNeighbors(
-    const std::vector<Eigen::Vector3d> &queries) const {
+namespace {
+std::vector<std::tuple<Eigen::Vector3d, double>> ClosestNeighborsImpl(
+    const gpu::VoxelMapGpu &gpu, const std::vector<Eigen::Vector3d> &queries) {
     std::vector<Eigen::Vector3d> nn(queries.size());
     std::vector<double> dist(queries.size());
-    if (!queries.empty()) gpu_->ClosestNeighbors(Data(queries), queries.size(), nn.front().data(), dist.data());
+    if (!queries.empty()) gpu.ClosestNeighbors(Data(queries), queries.size(), nn.front().data(), dist.data());
     std::vector<std::tuple<Eigen::Vector3d, double>> out;
     out.reserve(queries.size());
     for (std::size_t i = 0; i < queries.size(); ++i) {
@@ -82,9 +87,17 @@ std::vector<std::tuple<Eigen::Vector3d, double>> VoxelHashMap::GetClosestNeighbo
     }
     return out;
 }
+}  // namespace
+
+std::vector<std::tuple<Eigen::Vector3d, double>> VoxelHashMap::GetClosestNeighbors(
+    const std::vector<Eigen::Vector3d> &queries) const {
+    const profile::Scope profile_scope(profile::kNnBatch);
+    return ClosestNeighborsImpl(*gpu_, queries);
+}
 
 std::tuple<Eigen::Vector3d, double> VoxelHashMap::GetClosestNeighbor(const Eigen::Vector3d &query) const {
-    return GetClosestNeighbors({query}).front();
+    const profile::Scope profile_scope(profile::kNnSingle);
+    return ClosestNeighborsImpl(*gpu_, {query}).front();
 }
 
 void VoxelHashMap::Update(const std::vector<Eigen::Vector3d> &points, const Eigen::Vector3d &origin) {
@@ -144,6 +157,7 @@ std::tuple<Eigen::Vector3d, double> VoxelHashMap::GetClosestNeighbor(
 }
 
 std::vector<Eigen::Vector3d> VoxelHashMap::Pointcloud() const {
+    const profile::Scope profile_scope(profile::kPointcloud);
     std::vector<Eigen::Vector3d> points;
     points.reserve(map_.size() * static_cast<size_t>(max_points_per_voxel_));
     std::for_each(map_.cbegin(), map_.cend(), [&](const auto &map_element) {
@@ -169,6 +183,7 @@ void VoxelHashMap::Update(const std::vector<Eigen::Vector3d> &points, const Soph
 }
 
 void VoxelHashMap::AddPoints(const std::vector<Eigen::Vector3d> &points) {
+    const profile::Scope profile_scope(profile::kMapAdd);
     const double map_resolution = std::sqrt(voxel_size_ * voxel_size_ / max_points_per_voxel_);
     std::for_each(points.cbegin(), points.cend(), [&](const auto &point) {
         const auto voxel = PointToVoxel(point, voxel_size_);
@@ -193,6 +208,7 @@ void VoxelHashMap::AddPoints(const std::vector<Eigen::Vector3d> &points) {
 }
 
 void VoxelHashMap::RemovePointsFarFromLocation(const Eigen::Vector3d &origin) {
+    const profile::Scope profile_scope(profile::kMapCrop);
     const auto max_distance2 = max_distance_ * max_distance_;
     for (auto it = map_.begin(); it != map_.end();) {
         const auto &[voxel, voxel_points] = *it;

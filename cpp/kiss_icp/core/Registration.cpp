@@ -37,6 +37,7 @@
 #include <sophus/so3.hpp>
 #include <tuple>
 
+#include "Profile.hpp"
 #include "VoxelHashMap.hpp"
 #include "VoxelUtils.hpp"
 
@@ -165,6 +166,13 @@ Sophus::SE3d Registration::AlignPointsToMap(const std::vector<Eigen::Vector3d> &
                                             const double max_distance,
                                             const double kernel_scale) {
     last_num_iterations_ = 0;
+    profile::BeginFrame();
+    const profile::Scope profile_scope(profile::kAlign);
+    struct AlignInfo {  // reports iterations/source size on every return path
+        const int &iterations;
+        std::size_t points;
+        ~AlignInfo() { profile::SetAlignInfo(iterations, points); }
+    } align_info{last_num_iterations_, frame.size()};
     if (voxel_map.Empty()) return initial_guess;
 
 #ifdef KISS_ICP_CUDA

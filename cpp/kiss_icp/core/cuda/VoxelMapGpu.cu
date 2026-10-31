@@ -436,6 +436,15 @@ inline const T *Raw(const thrust::device_vector<T> &v) {
 
 }  // namespace
 
+std::string DeviceDescription() {
+    int device = 0;
+    cudaDeviceProp prop{};
+    if (cudaGetDevice(&device) != cudaSuccess || cudaGetDeviceProperties(&prop, device) != cudaSuccess)
+        return "unknown device";
+    return std::string(prop.name) + " (sm_" + std::to_string(prop.major) + std::to_string(prop.minor) +
+           ", " + std::to_string(prop.multiProcessorCount) + " SMs)";
+}
+
 // =============================================================================================
 struct VoxelMapGpu::Impl {
     Impl(double voxel_size_, double max_distance_, unsigned int max_points_, std::size_t max_voxels_)
