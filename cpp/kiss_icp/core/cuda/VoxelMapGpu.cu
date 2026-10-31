@@ -432,6 +432,27 @@ std::string DeviceDescription() {
            ", " + std::to_string(prop.multiProcessorCount) + " SMs)";
 }
 
+// First CUDA call of the process: creates the context. Fail here with an actionable message
+// instead of somewhere inside cuCollections' allocator.
+int InitDeviceOrThrow() {
+    int count = 0;
+    cudaError_t err = cudaGetDeviceCount(&count);
+    if (err == cudaSuccess && count == 0) err = cudaErrorNoDevice;
+    if (err == cudaSuccess) err = cudaFree(nullptr);  // forces context creation
+    int device = 0, sms = 0;
+    if (err == cudaSuccess) err = cudaGetDevice(&device);
+    if (err == cudaSuccess) err = cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device);
+    if (err != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("[kiss_icp::gpu] cannot initialise the CUDA device: ") + cudaGetErrorName(err) +
+            " (" + cudaGetErrorString(err) +
+            "). The GPU driver is not usable from this process. Check `nvidia-smi`; after a "
+            "suspend/resume reload the UVM module (sudo rmmod nvidia_uvm && sudo modprobe "
+            "nvidia_uvm) or reboot; `sudo dmesg | grep -i xid` shows driver/GPU faults.");
+    }
+    return sms;
+}
+
 // =============================================================================================
 struct VoxelMapGpu::Impl {
     Impl(double voxel_size_, double max_distance_, unsigned int max_points_, std::size_t max_voxels_)
@@ -440,6 +461,7 @@ struct VoxelMapGpu::Impl {
           max_points(static_cast<int>(max_points_)),
           max_voxels(max_voxels_),
           resolution2(voxel_size_ * voxel_size_ / max_points_),
+          num_sms(InitDeviceOrThrow()),
           map(cuco::extent<std::size_t>{2 * max_voxels_},
               cuco::empty_key<Key>{kEmptyKey},
               cuco::empty_value<Value>{kEmptyValue},
@@ -453,10 +475,6 @@ struct VoxelMapGpu::Impl {
         if (max_voxels_ == 0 || max_voxels_ > (1u << 30)) {
             throw std::invalid_argument("[kiss_icp::gpu] invalid max_voxels");
         }
-        int device = 0;
-        KISS_CUDA_CHECK(cudaGetDevice(&device));
-        KISS_CUDA_CHECK(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device));
-
         block_key.resize(max_voxels);
         block_count.resize(max_voxels);
         block_pts.resize(max_voxels * kMaxPoints);

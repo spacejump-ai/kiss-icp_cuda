@@ -3,6 +3,12 @@
 
 #include <cmath>
 
+namespace kiss_icp::gpu {
+/// Creates the CUDA context; throws std::runtime_error with a readable hint if the driver is not
+/// usable. Returns the multiprocessor count. Defined in VoxelMapGpu.cu.
+int InitDeviceOrThrow();
+}  // namespace kiss_icp::gpu
+
 namespace kiss_icp::gpu::detail {
 
 // 21 bits per axis, offset so that negative voxel coordinates map to positive ints.

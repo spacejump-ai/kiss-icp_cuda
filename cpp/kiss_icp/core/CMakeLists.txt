@@ -26,7 +26,9 @@ target_link_libraries(kiss_icp_core PUBLIC Eigen3::Eigen tsl::robin_map TBB::tbb
 set_global_target_properties(kiss_icp_core)
 
 if(KISS_ICP_USE_CUDA)
-  target_sources(kiss_icp_core PRIVATE cuda/VoxelMapGpu.cu cuda/DownsampleGpu.cu)
+  target_sources(kiss_icp_core PRIVATE cuda/VoxelMapGpu.cu cuda/DownsampleGpu.cu cuda/PreprocessGpu.cu)
+  # evaluate deskew/range arithmetic like the CPU code (no fused multiply-add)
+  set_source_files_properties(cuda/PreprocessGpu.cu PROPERTIES COMPILE_OPTIONS "-fmad=false")
   target_link_libraries(kiss_icp_core PUBLIC CUDA::cudart PRIVATE cuco::cuco)
   target_compile_definitions(
     kiss_icp_core PUBLIC KISS_ICP_CUDA KISS_ICP_CUDA_MAX_POINTS_PER_VOXEL=${KISS_ICP_CUDA_MAX_POINTS_PER_VOXEL}

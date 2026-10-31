@@ -48,6 +48,12 @@ free list   stack of unused block indices
   so the kept set is identical. The output comes in input order rather than robin_map order.
   `VoxelDownsampleCpu()` is the original, available in both builds.
 
+* **Preprocess** (`PreprocessGpu.cu`, deskew + range crop, inputs of 4096+ points): one thread
+  per point evaluates Sophus' `SE3::exp((s - 1) * omega)` step by step and applies it, then the
+  points inside `(min_range, max_range)` are compacted in input order. Compiled with
+  `-fmad=false`; crop-only output is bit-identical to the CPU, deskewed points differ by ~1e-15 m
+  (GPU vs libm sin/cos). `Preprocessor::PreprocessCpu()` is the original.
+
 Public API of `VoxelHashMap` is unchanged (`KissICP.cpp`, pybind sources compile as-is). Additions:
 `GetClosestNeighbors(vector)` (batched), `NumVoxels()`, `Gpu()`.
 

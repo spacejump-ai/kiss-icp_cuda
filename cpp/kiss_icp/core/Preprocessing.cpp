@@ -35,7 +35,12 @@
 #include <Eigen/Geometry>
 #include <algorithm>
 #include <functional>
+#include <stdexcept>
 #include <vector>
+
+#ifdef KISS_ICP_CUDA
+#include "cuda/PreprocessGpu.hpp"
+#endif
 
 namespace kiss_icp {
 
@@ -58,6 +63,34 @@ std::vector<Eigen::Vector3d> Preprocessor::Preprocess(const std::vector<Eigen::V
                                                       const std::vector<double> &timestamps,
                                                       const Sophus::SE3d &relative_motion) const {
     const profile::Scope profile_scope(profile::kPreprocess);
+#ifdef KISS_ICP_CUDA
+    if (frame.size() >= gpu::kPreprocessMinPoints) {
+        const bool deskew = deskew_ && !timestamps.empty();
+        double t_min = 0.0, t_max = 0.0;
+        if (deskew) {
+            if (timestamps.size() < frame.size()) {  // the CPU version throws from .at() too
+                throw std::out_of_range("kiss_icp::Preprocess: fewer timestamps than points");
+            }
+            const auto [mn, mx] = std::minmax_element(timestamps.cbegin(), timestamps.cend());
+            t_min = *mn;
+            t_max = *mx;
+        }
+        const Sophus::SE3d::Tangent omega = relative_motion.log();
+        std::vector<Eigen::Vector3d> out;
+        gpu::Preprocess(frame.front().data(), frame.size(), deskew ? timestamps.data() : nullptr,
+                        t_min, t_max, omega.data(), min_range_, max_range_, [&](std::size_t m) {
+                            out.resize(m);
+                            return m > 0 ? out.front().data() : nullptr;
+                        });
+        return out;
+    }
+#endif
+    return PreprocessCpu(frame, timestamps, relative_motion);
+}
+
+std::vector<Eigen::Vector3d> Preprocessor::PreprocessCpu(const std::vector<Eigen::Vector3d> &frame,
+                                                         const std::vector<double> &timestamps,
+                                                         const Sophus::SE3d &relative_motion) const {
     const std::vector<Eigen::Vector3d> &deskewed_frame = [&]() {
         if (!deskew_ || timestamps.empty()) {
             return frame;

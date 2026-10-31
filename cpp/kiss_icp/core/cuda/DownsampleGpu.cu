@@ -67,6 +67,7 @@ public:
              double voxel_size,
              const std::function<double *(std::size_t)> &alloc_out) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (num_sms_ == 0) num_sms_ = InitDeviceOrThrow();
         const int n = static_cast<int>(n_points);
         Reserve(n_points);
 
@@ -100,11 +101,6 @@ public:
 
 private:
     int Grid(std::size_t work) {
-        if (num_sms_ == 0) {
-            int device = 0;
-            KISS_DS_CHECK(cudaGetDevice(&device));
-            KISS_DS_CHECK(cudaDeviceGetAttribute(&num_sms_, cudaDevAttrMultiProcessorCount, device));
-        }
         const std::size_t blocks = (work + kBlockSize - 1) / kBlockSize;
         const std::size_t cap = static_cast<std::size_t>(num_sms_) * 8;
         return static_cast<int>(blocks < cap ? blocks : cap);

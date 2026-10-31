@@ -38,6 +38,11 @@ struct Preprocessor {
     std::vector<Eigen::Vector3d> Preprocess(const std::vector<Eigen::Vector3d> &frame,
                                             const std::vector<double> &timestamps,
                                             const Sophus::SE3d &relative_motion) const;
+    /// The original CPU implementation (TBB). Preprocess() uses the GPU in the CUDA build for
+    /// inputs >= gpu::kPreprocessMinPoints and this otherwise.
+    std::vector<Eigen::Vector3d> PreprocessCpu(const std::vector<Eigen::Vector3d> &frame,
+                                               const std::vector<double> &timestamps,
+                                               const Sophus::SE3d &relative_motion) const;
     double max_range_;
     double min_range_;
     bool deskew_;

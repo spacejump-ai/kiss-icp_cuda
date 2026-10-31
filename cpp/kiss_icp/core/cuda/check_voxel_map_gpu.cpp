@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "kiss_icp/core/Preprocessing.hpp"
 #include "kiss_icp/core/Registration.hpp"
 #include "kiss_icp/core/VoxelHashMap.hpp"
 #include "kiss_icp/core/VoxelUtils.hpp"
@@ -178,6 +179,40 @@ int main() {
     kiss_icp::VoxelHashMap map(voxel_size, max_range, max_points);
 #endif
     RefMap ref{voxel_size, max_range, max_points, {}};
+
+    // 00) Preprocess (deskew + range crop) vs the CPU implementation.
+    {
+        std::uniform_real_distribution<double> ua(-M_PI / 3, M_PI / 3), ur(0.2, 140.0), uz(-0.3, 0.3);
+        Points scan;
+        std::vector<double> stamps;
+        for (int i = 0; i < 650000; ++i) {   // 120 deg FoV, ranges across both crop limits
+            const double a = ua(rng), r = ur(rng);
+            scan.emplace_back(r * std::cos(a), r * std::sin(a), r * uz(rng));
+            stamps.push_back(1.7e9 + 0.1 * (a + M_PI / 3) / (2 * M_PI / 3));  // 100 ms sweep
+        }
+        Vector6d xi;
+        xi << 1.2, 0.05, 0.01, 0.002, -0.001, 0.05;  // ~1.2 m, ~3 deg per frame
+        const Sophus::SE3d motion = Sophus::SE3d::exp(xi);
+        for (bool deskew : {false, true}) {
+            const kiss_icp::Preprocessor pre(100.0, 1.0, deskew, 0);
+            const auto t0 = Clock::now();
+            const Points gpu_out = pre.Preprocess(scan, stamps, motion);
+            const auto t1 = Clock::now();
+            const Points cpu_out = pre.PreprocessCpu(scan, stamps, motion);
+            const auto t2 = Clock::now();
+            double max_err = 0.0;
+            if (gpu_out.size() == cpu_out.size())
+                for (std::size_t i = 0; i < cpu_out.size(); ++i)
+                    max_err = std::max(max_err, (gpu_out[i] - cpu_out[i]).norm());
+            char what[96];
+            std::snprintf(what, sizeof(what), "preprocess %s: same points/order as CPU", deskew ? "deskew+crop" : "crop only");
+            Check(gpu_out.size() == cpu_out.size(), what, static_cast<double>(gpu_out.size()));
+            std::snprintf(what, sizeof(what), "preprocess %s: max abs diff [m]", deskew ? "deskew+crop" : "crop only");
+            Check(deskew ? max_err < 1e-9 : max_err == 0.0, what, max_err);
+            std::printf("       %zu -> %zu points: Preprocess %.2f ms, CPU version %.2f ms\n", scan.size(),
+                        gpu_out.size(), Ms(t0, t1), Ms(t1, t2));
+        }
+    }
 
     // 0) VoxelDownsample vs the CPU implementation (650k points, negative coordinates, points
     //    exactly on voxel borders, duplicates).
