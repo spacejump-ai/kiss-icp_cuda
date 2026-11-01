@@ -9,6 +9,9 @@ namespace kiss_icp::gpu::detail {
 /// Return the number of points written to d_out. Synchronous; serialized internally.
 std::size_t VoxelDownsampleDevice(const double *d_in, std::size_t n, double voxel_size, double *d_out);
 
+/// Host CPU implementation (VoxelUtils.cpp), used as the GPU downsampler's fallback.
+std::size_t VoxelDownsampleCpuInterleaved(const double *xyz, std::size_t n, double voxel_size, double *out);
+
 std::size_t PreprocessDevice(const double *d_in,
                              const double *d_stamps,  // device, or nullptr (no deskew)
                              std::size_t n,

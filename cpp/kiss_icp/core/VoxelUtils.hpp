@@ -37,8 +37,8 @@ inline Voxel PointToVoxel(const Eigen::Vector3d &point, const double voxel_size)
 }
 
 /// Voxelize a point cloud keeping the original coordinates (first point of every voxel).
-/// CUDA build: runs on the GPU for inputs >= gpu::kDownsampleMinPoints and returns the points
-/// in input order; the set of kept points is identical to the CPU version.
+/// CUDA build: runs on the GPU for inputs >= gpu::kDownsampleMinPoints; the result (including
+/// sampling order) is identical to the CPU version.
 std::vector<Eigen::Vector3d> VoxelDownsample(const std::vector<Eigen::Vector3d> &frame,
                                              const double voxel_size);
 

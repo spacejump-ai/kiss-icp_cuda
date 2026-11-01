@@ -5,7 +5,10 @@
 #include "Profile.hpp"
 
 #ifdef KISS_ICP_CUDA
+#include <cstring>
+
 #include "cuda/DownsampleGpu.hpp"
+#include "cuda/Internal.cuh"
 #endif
 
 namespace kiss_icp {
@@ -24,9 +27,20 @@ std::vector<Eigen::Vector3d> VoxelDownsample(const std::vector<Eigen::Vector3d> 
         return out;
     }
 #endif
-    // if < minpoints fallback to CPU
-	return VoxelDownsampleCpu(frame, voxel_size);
+    return VoxelDownsampleCpu(frame, voxel_size);
 }
+
+#ifdef KISS_ICP_CUDA
+namespace gpu::detail {
+std::size_t VoxelDownsampleCpuInterleaved(const double *xyz, std::size_t n, double voxel_size, double *out) {
+    std::vector<Eigen::Vector3d> in(n);
+    if (n > 0) std::memcpy(in.front().data(), xyz, 3 * n * sizeof(double));
+    const auto ds = VoxelDownsampleCpu(in, voxel_size);
+    if (!ds.empty()) std::memcpy(out, ds.front().data(), 3 * ds.size() * sizeof(double));
+    return ds.size();
+}
+}  // namespace gpu::detail
+#endif
 
 std::vector<Eigen::Vector3d> VoxelDownsampleCpu(const std::vector<Eigen::Vector3d> &frame,
                                                 const double voxel_size) {

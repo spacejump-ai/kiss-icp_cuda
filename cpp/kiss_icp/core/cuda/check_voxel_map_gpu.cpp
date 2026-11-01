@@ -24,6 +24,9 @@
 #include "kiss_icp/core/Registration.hpp"
 #include "kiss_icp/core/VoxelHashMap.hpp"
 #include "kiss_icp/core/VoxelUtils.hpp"
+#ifdef KISS_ICP_CUDA
+#include "kiss_icp/core/cuda/DownsampleGpu.hpp"
+#endif
 
 namespace {
 using kiss_icp::Voxel;
@@ -276,13 +279,35 @@ int main() {
             char what[96];
             std::snprintf(what, sizeof(what), "downsample %.1f m: same points as CPU version", vs);
             Check(sorted(ds) == sorted(cpu), what, static_cast<double>(ds.size()));
-            if (kGpu) {
-                std::snprintf(what, sizeof(what), "downsample %.1f m: input order kept", vs);
-                Check(ds == ref_ds, what);
-            }
+            std::snprintf(what, sizeof(what), "downsample %.1f m: same order as CPU version", vs);
+            Check(ds == cpu, what);
+            (void)ref_ds;
             std::printf("       %zu -> %zu points: VoxelDownsample %.2f ms, CPU version %.2f ms\n",
                         cloud.size(), ds.size(), Ms(t0, t1), Ms(t1, t2));
         }
+        // chained like KISS-ICP (the order of the first result decides the second)
+        {
+            const Points ds = kiss_icp::VoxelDownsample(cloud, 0.5);
+            const Points src = kiss_icp::VoxelDownsample(ds, 1.5);
+            const Points cpu_ds = kiss_icp::VoxelDownsampleCpu(cloud, 0.5);
+            const Points cpu_src = kiss_icp::VoxelDownsampleCpu(cpu_ds, 1.5);
+            Check(ds == cpu_ds && src == cpu_src, "downsample chain 0.5 -> 1.5 identical to CPU",
+                  static_cast<double>(src.size()));
+        }
+        // many small clouds: exercises table wrap-around and shared home buckets
+        {
+            std::size_t mismatches = 0;
+            std::uniform_real_distribution<double> us(-20.0, 20.0);
+            for (int trial = 0; trial < 300; ++trial) {
+                Points c(4096 + static_cast<std::size_t>(trial) * 37);
+                for (auto &p : c) p = Eigen::Vector3d(us(rng), us(rng), 0.1 * us(rng));
+                mismatches += !(kiss_icp::VoxelDownsample(c, 0.5) == kiss_icp::VoxelDownsampleCpu(c, 0.5));
+            }
+            Check(mismatches == 0, "downsample 300 small clouds identical to CPU", static_cast<double>(mismatches));
+        }
+#ifdef KISS_ICP_CUDA
+        std::printf("       GPU downsample fell back to CPU %zu times\n", kiss_icp::gpu::DownsampleFallbackCount());
+#endif
         // below the GPU threshold the CPU path is used; result must still be right
         const Points small(cloud.begin(), cloud.begin() + 1000);
         const Points ds_small = kiss_icp::VoxelDownsample(small, 0.5);

@@ -43,9 +43,14 @@ free list   stack of unused block indices
   float, residuals and the normal equations are double.
 
 * **VoxelDownsample** (`DownsampleGpu.cu`, used automatically in the CUDA build for inputs of
-  4096+ points): voxel keys on the GPU, stable radix sort of (key, index), flag the first entry of
-  each run, compact the flagged points. Keeps the first point of each voxel like the CPU version,
-  so the kept set is identical. The output comes in input order rather than robin_map order.
+  4096+ points): returns exactly the CPU result **including sampling order**. The CPU returns points in
+  `tsl::robin_map` iteration order, and KISS-ICP depends on it: the second downsample and the map
+  keep the first point per voxel, so scan order instead of hash order biases the representative
+  points (grid pattern, more drift; v7-v10 had this bug). The GPU reproduces the robin_map layout:
+  first point per voxel via a stable radix sort, home bucket = same hash & same table size as
+  `reserve(n)`, slot positions by a prefix-max scan (with wrap-around), and a per-cluster replay of
+  tsl's robin-hood insertions for entries sharing a home bucket. Pathological clusters
+  (> 128 slots) fall back to the CPU (`gpu::DownsampleFallbackCount()`).
   `VoxelDownsampleCpu()` is the original, available in both builds.
 
 * **Preprocess** (`PreprocessGpu.cu`, deskew + range crop, inputs of 4096+ points): one thread

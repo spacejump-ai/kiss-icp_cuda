@@ -10,10 +10,10 @@ namespace kiss_icp::gpu {
 /// and transfers cost more than the hash map.
 inline constexpr std::size_t kDownsampleMinPoints = 4096;
 
-/// Keeps the first point (in input order) of every voxel, like kiss_icp::VoxelDownsample on the
-/// CPU, and returns the kept points in input order. Voxel assignment uses the same double
-/// arithmetic as kiss_icp::PointToVoxel, so the kept set is identical to the CPU result
-/// (the CPU returns it in hash-map order). Voxel coordinates must stay within +-2^20 per axis.
+/// Same result as kiss_icp::VoxelDownsample on the CPU, including the order of the output
+/// (the CPU returns points in tsl::robin_map iteration order, which KISS-ICP depends on: the next
+/// downsample and the map keep the first point per voxel). Voxel coordinates must stay within
+/// +-2^20 per axis.
 ///
 /// xyz: n interleaved points. alloc_out(m) must return storage for 3*m doubles.
 /// Thread safe; concurrent calls are serialized.
@@ -21,5 +21,8 @@ void VoxelDownsample(const double *xyz,
                      std::size_t n,
                      double voxel_size,
                      const std::function<double *(std::size_t)> &alloc_out);
+
+/// How often the GPU path handed over to the CPU implementation (pathological hash clusters).
+std::size_t DownsampleFallbackCount();
 
 }  // namespace kiss_icp::gpu
