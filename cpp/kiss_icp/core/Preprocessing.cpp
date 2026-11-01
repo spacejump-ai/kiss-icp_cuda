@@ -23,6 +23,7 @@
 #include "Preprocessing.hpp"
 
 #include "Profile.hpp"
+#include "VoxelUtils.hpp"
 
 #include <tbb/blocked_range.h>
 #include <tbb/concurrent_vector.h>
@@ -39,10 +40,48 @@
 #include <vector>
 
 #ifdef KISS_ICP_CUDA
+#include "cuda/FramePipelineGpu.hpp"
 #include "cuda/PreprocessGpu.hpp"
 #endif
 
 namespace kiss_icp {
+
+#ifdef KISS_ICP_CUDA
+namespace {
+struct GpuArgs {
+    const double *stamps = nullptr;  // nullptr: no deskew
+    double t_min = 0.0, t_max = 0.0;
+    Sophus::SE3d::Tangent omega;
+};
+
+GpuArgs MakeGpuArgs(bool deskew_enabled,
+                    const std::vector<Eigen::Vector3d> &frame,
+                    const std::vector<double> &timestamps,
+                    const Sophus::SE3d &relative_motion) {
+    GpuArgs g;
+    g.omega = relative_motion.log();
+    if (deskew_enabled && !timestamps.empty()) {
+        if (timestamps.size() < frame.size()) {  // the CPU version throws from .at() too
+            throw std::out_of_range("kiss_icp::Preprocess: fewer timestamps than points");
+        }
+        const auto [mn, mx] = std::minmax_element(timestamps.cbegin(), timestamps.cend());
+        g.stamps = timestamps.data();
+        g.t_min = *mn;
+        g.t_max = *mx;
+    }
+    return g;
+}
+
+// alloc callback writing into a std::vector<Eigen::Vector3d> (3 packed doubles per point)
+std::function<double *(std::size_t)> Sink(std::vector<Eigen::Vector3d> &v) {
+    static_assert(sizeof(Eigen::Vector3d) == 3 * sizeof(double), "unexpected Eigen layout");
+    return [&v](std::size_t m) {
+        v.resize(m);
+        return m > 0 ? v.front().data() : nullptr;
+    };
+}
+}  // namespace
+#endif
 
 Preprocessor::Preprocessor(const double max_range,
                            const double min_range,
@@ -65,27 +104,38 @@ std::vector<Eigen::Vector3d> Preprocessor::Preprocess(const std::vector<Eigen::V
     const profile::Scope profile_scope(profile::kPreprocess);
 #ifdef KISS_ICP_CUDA
     if (frame.size() >= gpu::kPreprocessMinPoints) {
-        const bool deskew = deskew_ && !timestamps.empty();
-        double t_min = 0.0, t_max = 0.0;
-        if (deskew) {
-            if (timestamps.size() < frame.size()) {  // the CPU version throws from .at() too
-                throw std::out_of_range("kiss_icp::Preprocess: fewer timestamps than points");
-            }
-            const auto [mn, mx] = std::minmax_element(timestamps.cbegin(), timestamps.cend());
-            t_min = *mn;
-            t_max = *mx;
-        }
-        const Sophus::SE3d::Tangent omega = relative_motion.log();
+        const GpuArgs g = MakeGpuArgs(deskew_, frame, timestamps, relative_motion);
         std::vector<Eigen::Vector3d> out;
-        gpu::Preprocess(frame.front().data(), frame.size(), deskew ? timestamps.data() : nullptr,
-                        t_min, t_max, omega.data(), min_range_, max_range_, [&](std::size_t m) {
-                            out.resize(m);
-                            return m > 0 ? out.front().data() : nullptr;
-                        });
+        gpu::Preprocess(frame.front().data(), frame.size(), g.stamps, g.t_min, g.t_max,
+                        g.omega.data(), min_range_, max_range_, Sink(out));
         return out;
     }
 #endif
     return PreprocessCpu(frame, timestamps, relative_motion);
+}
+
+PreprocessedFrame Preprocessor::PreprocessAndVoxelize(const std::vector<Eigen::Vector3d> &frame,
+                                                       const std::vector<double> &timestamps,
+                                                       const Sophus::SE3d &relative_motion,
+                                                       double voxel_ds,
+                                                       double voxel_src,
+                                                       bool keep_frame) const {
+    PreprocessedFrame out;
+#ifdef KISS_ICP_CUDA
+    if (frame.size() >= gpu::kPreprocessMinPoints) {
+        const GpuArgs g = MakeGpuArgs(deskew_, frame, timestamps, relative_motion);
+        gpu::PreprocessAndVoxelize(frame.front().data(), frame.size(), g.stamps, g.t_min, g.t_max,
+                                   g.omega.data(), min_range_, max_range_, voxel_ds, voxel_src,
+                                   keep_frame ? Sink(out.frame) : nullptr,
+                                   Sink(out.frame_downsample), Sink(out.source));
+        return out;
+    }
+#endif
+    out.frame = Preprocess(frame, timestamps, relative_motion);
+    out.frame_downsample = VoxelDownsample(out.frame, voxel_ds);
+    out.source = VoxelDownsample(out.frame_downsample, voxel_src);
+    if (!keep_frame) std::vector<Eigen::Vector3d>().swap(out.frame);
+    return out;
 }
 
 std::vector<Eigen::Vector3d> Preprocessor::PreprocessCpu(const std::vector<Eigen::Vector3d> &frame,

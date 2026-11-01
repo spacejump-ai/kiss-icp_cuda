@@ -29,6 +29,12 @@
 
 namespace kiss_icp {
 
+struct PreprocessedFrame {
+    std::vector<Eigen::Vector3d> frame;             ///< deskewed + range cropped (empty if not requested)
+    std::vector<Eigen::Vector3d> frame_downsample;  ///< VoxelDownsample(frame, voxel_ds): goes into the map
+    std::vector<Eigen::Vector3d> source;            ///< VoxelDownsample(frame_downsample, voxel_src): ICP input
+};
+
 struct Preprocessor {
     Preprocessor(const double max_range,
                  const double min_range,
@@ -43,6 +49,17 @@ struct Preprocessor {
     std::vector<Eigen::Vector3d> PreprocessCpu(const std::vector<Eigen::Vector3d> &frame,
                                                const std::vector<double> &timestamps,
                                                const Sophus::SE3d &relative_motion) const;
+    /// Preprocess + the two VoxelDownsample calls of KissICP::Voxelize in one go
+    /// (voxel_ds = voxel_size * 0.5, voxel_src = voxel_size * 1.5 there).
+    /// CUDA build: the scan is uploaded once and stays on the GPU between the steps; results are
+    /// identical to calling Preprocess and VoxelDownsample separately. keep_frame = false skips
+    /// downloading the full preprocessed scan.
+    PreprocessedFrame PreprocessAndVoxelize(const std::vector<Eigen::Vector3d> &frame,
+                                            const std::vector<double> &timestamps,
+                                            const Sophus::SE3d &relative_motion,
+                                            double voxel_ds,
+                                            double voxel_src,
+                                            bool keep_frame = true) const;
     double max_range_;
     double min_range_;
     bool deskew_;

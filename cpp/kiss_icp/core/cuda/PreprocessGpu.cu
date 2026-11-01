@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "Internal.cuh"
 #include "PreprocessGpu.hpp"
 #include "VoxelKey.cuh"  // InitDeviceOrThrow
 
@@ -130,36 +131,61 @@ public:
              const std::function<double *(std::size_t)> &alloc_out) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (num_sms_ == 0) num_sms_ = InitDeviceOrThrow();
-        const int n = static_cast<int>(n_points);
         Reserve(n_points);
-
         KISS_PP_CHECK(cudaMemcpy(in_, xyz, n_points * sizeof(P3), cudaMemcpyHostToDevice));
         if (timestamps != nullptr) {
             KISS_PP_CHECK(cudaMemcpy(stamps_, timestamps, n_points * sizeof(double),
                                      cudaMemcpyHostToDevice));
         }
-        Twist w;
-        for (int k = 0; k < 6; ++k) w.v[k] = omega[k];
-        PreprocessKernel<<<Grid(n_points), kBlockSize>>>(
-            in_, timestamps != nullptr ? stamps_ : nullptr, n, t_min, t_max - t_min, w, min_range,
-            max_range, deskewed_, keep_);
-        KISS_PP_CHECK(cudaGetLastError());
+        const std::size_t m = DeviceLocked(in_, timestamps != nullptr ? stamps_ : nullptr, n_points,
+                                           t_min, t_max, omega, min_range, max_range, out_);
+        double *dst = alloc_out(m);
+        if (m > 0) KISS_PP_CHECK(cudaMemcpy(dst, out_, m * sizeof(P3), cudaMemcpyDeviceToHost));
+    }
 
-        std::size_t bytes = 0;
-        KISS_PP_CHECK(cub::DeviceSelect::Flagged(nullptr, bytes, deskewed_, keep_, out_, num_out_, n));
-        Temp(bytes);
-        KISS_PP_CHECK(cub::DeviceSelect::Flagged(temp_, bytes, deskewed_, keep_, out_, num_out_, n));
-
-        int m = 0;
-        KISS_PP_CHECK(cudaMemcpy(&m, num_out_, sizeof(int), cudaMemcpyDeviceToHost));
-        double *dst = alloc_out(static_cast<std::size_t>(m));
-        if (m > 0) {
-            KISS_PP_CHECK(cudaMemcpy(dst, out_, static_cast<std::size_t>(m) * sizeof(P3),
-                                     cudaMemcpyDeviceToHost));
-        }
+    std::size_t Device(const P3 *d_in,
+                       const double *d_stamps,
+                       std::size_t n_points,
+                       double t_min,
+                       double t_max,
+                       const double omega[6],
+                       double min_range,
+                       double max_range,
+                       P3 *d_out) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (num_sms_ == 0) num_sms_ = InitDeviceOrThrow();
+        Reserve(n_points);
+        return DeviceLocked(d_in, d_stamps, n_points, t_min, t_max, omega, min_range, max_range, d_out);
     }
 
 private:
+    std::size_t DeviceLocked(const P3 *d_in,
+                             const double *d_stamps,
+                             std::size_t n_points,
+                             double t_min,
+                             double t_max,
+                             const double omega[6],
+                             double min_range,
+                             double max_range,
+                             P3 *d_out) {
+        if (n_points == 0) return 0;
+        const int n = static_cast<int>(n_points);
+        Twist w;
+        for (int k = 0; k < 6; ++k) w.v[k] = omega[k];
+        PreprocessKernel<<<Grid(n_points), kBlockSize>>>(d_in, d_stamps, n, t_min, t_max - t_min, w,
+                                                         min_range, max_range, deskewed_, keep_);
+        KISS_PP_CHECK(cudaGetLastError());
+
+        std::size_t bytes = 0;
+        KISS_PP_CHECK(cub::DeviceSelect::Flagged(nullptr, bytes, deskewed_, keep_, d_out, num_out_, n));
+        Temp(bytes);
+        KISS_PP_CHECK(cub::DeviceSelect::Flagged(temp_, bytes, deskewed_, keep_, d_out, num_out_, n));
+
+        int m = 0;
+        KISS_PP_CHECK(cudaMemcpy(&m, num_out_, sizeof(int), cudaMemcpyDeviceToHost));
+        return static_cast<std::size_t>(m);
+    }
+
     int Grid(std::size_t work) const {
         const std::size_t blocks = (work + kBlockSize - 1) / kBlockSize;
         const std::size_t cap = static_cast<std::size_t>(num_sms_) * 8;
@@ -200,7 +226,27 @@ private:
     int *num_out_ = nullptr;
 };
 
+Preprocessor &Instance() {
+    static Preprocessor *instance = new Preprocessor();  // intentionally leaked
+    return *instance;
+}
+
 }  // namespace
+
+namespace detail {
+std::size_t PreprocessDevice(const double *d_in,
+                             const double *d_stamps,
+                             std::size_t n,
+                             double t_min,
+                             double t_max,
+                             const double omega[6],
+                             double min_range,
+                             double max_range,
+                             double *d_out) {
+    return Instance().Device(reinterpret_cast<const P3 *>(d_in), d_stamps, n, t_min, t_max, omega,
+                             min_range, max_range, reinterpret_cast<P3 *>(d_out));
+}
+}  // namespace detail
 
 void Preprocess(const double *xyz,
                 std::size_t n,
@@ -218,8 +264,7 @@ void Preprocess(const double *xyz,
     if (n > static_cast<std::size_t>(INT32_MAX)) {
         throw std::invalid_argument("[kiss_icp::gpu] Preprocess: too many points");
     }
-    static Preprocessor *instance = new Preprocessor();  // intentionally leaked
-    instance->Run(xyz, n, timestamps, t_min, t_max, omega, min_range, max_range, alloc_out);
+    Instance().Run(xyz, n, timestamps, t_min, t_max, omega, min_range, max_range, alloc_out);
 }
 
 }  // namespace kiss_icp::gpu

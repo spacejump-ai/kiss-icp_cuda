@@ -212,6 +212,28 @@ int main() {
             std::printf("       %zu -> %zu points: Preprocess %.2f ms, CPU version %.2f ms\n", scan.size(),
                         gpu_out.size(), Ms(t0, t1), Ms(t1, t2));
         }
+        // combined call == separate calls (bit for bit), and timing of both ways
+        {
+            const kiss_icp::Preprocessor pre(100.0, 1.0, true, 0);
+            for (int rep = 0; rep < 2; ++rep) {  // 2nd round: buffers already allocated
+                const auto t0 = Clock::now();
+                const Points f = pre.Preprocess(scan, stamps, motion);
+                const Points ds = kiss_icp::VoxelDownsample(f, 0.5);
+                const Points src = kiss_icp::VoxelDownsample(ds, 1.5);
+                const auto t1 = Clock::now();
+                const auto c = pre.PreprocessAndVoxelize(scan, stamps, motion, 0.5, 1.5);
+                const auto t2 = Clock::now();
+                const auto c2 = pre.PreprocessAndVoxelize(scan, stamps, motion, 0.5, 1.5, false);
+                const auto t3 = Clock::now();
+                if (rep == 0) continue;
+                Check(c.frame == f && c.frame_downsample == ds && c.source == src,
+                      "combined call == separate calls", static_cast<double>(c.source.size()));
+                Check(c2.frame.empty() && c2.frame_downsample == ds && c2.source == src,
+                      "combined call without frame download");
+                std::printf("       separate calls %.2f ms, combined %.2f ms, combined w/o frame %.2f ms\n",
+                            Ms(t0, t1), Ms(t1, t2), Ms(t2, t3));
+            }
+        }
     }
 
     // 0) VoxelDownsample vs the CPU implementation (650k points, negative coordinates, points
@@ -267,6 +289,9 @@ int main() {
         Check(ds_small.size() == kiss_icp::VoxelDownsampleCpu(small, 0.5).size(),
               "downsample small input (CPU path)", static_cast<double>(ds_small.size()));
     }
+
+    // Same synthetic scene as earlier versions of this check, independent of the tests above.
+    rng.seed(42);
 
     // 1) Drive along x, insert + crop like KissICP does (exercises erase + tombstone rebuild).
     double t_update = 0.0;

@@ -13,6 +13,7 @@
 #include <string>
 
 #include "DownsampleGpu.hpp"
+#include "Internal.cuh"
 #include "VoxelKey.cuh"
 
 #define KISS_DS_CHECK(expr)                                                                  \
@@ -68,11 +69,25 @@ public:
              const std::function<double *(std::size_t)> &alloc_out) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (num_sms_ == 0) num_sms_ = InitDeviceOrThrow();
-        const int n = static_cast<int>(n_points);
         Reserve(n_points);
-
         KISS_DS_CHECK(cudaMemcpy(pts_, xyz, n_points * sizeof(P3), cudaMemcpyHostToDevice));
-        KeysKernel<<<Grid(n_points), kBlockSize>>>(pts_, n, voxel_size, keys_, idx_, flags_);
+        const std::size_t m = DeviceLocked(pts_, n_points, voxel_size, pts_out_);
+        double *out = alloc_out(m);
+        if (m > 0) KISS_DS_CHECK(cudaMemcpy(out, pts_out_, m * sizeof(P3), cudaMemcpyDeviceToHost));
+    }
+
+    std::size_t Device(const P3 *d_in, std::size_t n_points, double voxel_size, P3 *d_out) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (num_sms_ == 0) num_sms_ = InitDeviceOrThrow();
+        Reserve(n_points);
+        return DeviceLocked(d_in, n_points, voxel_size, d_out);
+    }
+
+private:
+    std::size_t DeviceLocked(const P3 *d_in, std::size_t n_points, double voxel_size, P3 *d_out) {
+        if (n_points == 0) return 0;
+        const int n = static_cast<int>(n_points);
+        KeysKernel<<<Grid(n_points), kBlockSize>>>(d_in, n, voxel_size, keys_, idx_, flags_);
         KISS_DS_CHECK(cudaGetLastError());
 
         // Radix sort is stable: equal keys keep their input order.
@@ -86,20 +101,15 @@ public:
         FlagHeadsKernel<<<Grid(n_points), kBlockSize>>>(keys_sorted_, idx_sorted_, n, flags_);
         KISS_DS_CHECK(cudaGetLastError());
 
-        KISS_DS_CHECK(cub::DeviceSelect::Flagged(nullptr, bytes, pts_, flags_, pts_out_, num_out_, n));
+        KISS_DS_CHECK(cub::DeviceSelect::Flagged(nullptr, bytes, d_in, flags_, d_out, num_out_, n));
         Temp(bytes);
-        KISS_DS_CHECK(cub::DeviceSelect::Flagged(temp_, bytes, pts_, flags_, pts_out_, num_out_, n));
+        KISS_DS_CHECK(cub::DeviceSelect::Flagged(temp_, bytes, d_in, flags_, d_out, num_out_, n));
 
         int m = 0;
         KISS_DS_CHECK(cudaMemcpy(&m, num_out_, sizeof(int), cudaMemcpyDeviceToHost));
-        double *out = alloc_out(static_cast<std::size_t>(m));
-        if (m > 0) {
-            KISS_DS_CHECK(cudaMemcpy(out, pts_out_, static_cast<std::size_t>(m) * sizeof(P3),
-                                     cudaMemcpyDeviceToHost));
-        }
+        return static_cast<std::size_t>(m);
     }
 
-private:
     int Grid(std::size_t work) {
         const std::size_t blocks = (work + kBlockSize - 1) / kBlockSize;
         const std::size_t cap = static_cast<std::size_t>(num_sms_) * 8;
@@ -142,6 +152,11 @@ private:
     unsigned char *flags_ = nullptr, *temp_ = nullptr;
 };
 
+Downsampler &Instance() {
+    static Downsampler *instance = new Downsampler();  // intentionally leaked, see class comment
+    return *instance;
+}
+
 }  // namespace
 
 void VoxelDownsample(const double *xyz,
@@ -155,8 +170,14 @@ void VoxelDownsample(const double *xyz,
     if (n > static_cast<std::size_t>(INT32_MAX)) {
         throw std::invalid_argument("[kiss_icp::gpu] VoxelDownsample: too many points");
     }
-    static Downsampler *instance = new Downsampler();  // intentionally leaked, see class comment
-    instance->Run(xyz, n, voxel_size, alloc_out);
+    Instance().Run(xyz, n, voxel_size, alloc_out);
 }
+
+namespace detail {
+std::size_t VoxelDownsampleDevice(const double *d_in, std::size_t n, double voxel_size, double *d_out) {
+    return Instance().Device(reinterpret_cast<const P3 *>(d_in), n, voxel_size,
+                             reinterpret_cast<P3 *>(d_out));
+}
+}  // namespace detail
 
 }  // namespace kiss_icp::gpu
